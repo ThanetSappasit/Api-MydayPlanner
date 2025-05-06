@@ -50,7 +50,8 @@ func CreateAccessToken(userID uint, role string) (string, error) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "mydayplanner",
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(30 * time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Minute)),
+			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(30 * time.Minute)),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -64,7 +65,8 @@ func CreateRefreshToken(userID uint) (string, error) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "mydayplanner",
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)), // Longer-lived token (7 days)
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * time.Minute)), // Longer-lived token (7 days)
+			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)), // Longer-lived token (7 days)
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -111,90 +113,120 @@ func isValidEmail(email string) error {
 func Signin(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	var request dto.SigninRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	// ตรวจสอบข้อมูลที่จำเป็น
+	if request.Email == "" || request.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Email and password are required"})
+		return
+	}
+
+	// ค้นหาผู้ใช้จากฐานข้อมูล
 	var user model.User
-	result := db.Where("email = ?", request.Email).First(&user)
-	if result.Error != nil {
-		if result.Error == gorm.ErrRecordNotFound {
-			c.JSON(404, gin.H{"error": "User not found"})
-			return
+	if err := db.Where("email = ?", request.Email).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		}
-		c.JSON(500, gin.H{"error": "Database error"})
 		return
 	}
 
-	err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(request.Password))
+	// ตรวจสอบรหัสผ่าน
+	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(request.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid password"})
+		return
+	}
+
+	// ตรวจสอบสถานะบัญชีผู้ใช้
+	switch user.IsActive {
+	case "0":
+		c.JSON(http.StatusForbidden, gin.H{"error": "User account is not active", "status": "0"})
+		return
+	case "2":
+		c.JSON(http.StatusForbidden, gin.H{"error": "User account is deleted", "status": "2"})
+		return
+	}
+
+	// ตรวจสอบการยืนยันบัญชี
+	if user.IsVerify != "1" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "User account is not verified"})
+		return
+	}
+
+	// สร้าง tokens
+	accessToken, err := CreateAccessToken(uint(user.UserID), user.Role)
 	if err != nil {
-		c.JSON(401, gin.H{"error": "Invalid password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create access token"})
 		return
-	} else {
-		accessToken, err := CreateAccessToken(uint(user.UserID), user.Role)
-		if err != nil {
-			c.JSON(500, gin.H{"error": "Failed to create token"})
-			return
-		}
-		refreshToken, err := CreateRefreshToken(uint(user.UserID))
-		if err != nil {
-			c.JSON(500, gin.H{"error": "Failed to create token"})
-			return
-		}
-
-		hashedRefreshToken, err := HashRefreshToken(refreshToken)
-		if err != nil {
-			c.JSON(500, gin.H{"error": "Failed to hash refresh token", "details": err.Error()})
-			return
-		}
-		refreshTokenClaims := jwt.MapClaims{
-			"issuer":    "mydayplanner",
-			"issuedAt":  time.Now().Unix(),
-			"expiresAt": time.Now().Add(7 * 24 * time.Hour).Unix(),
-		}
-
-		refreshTokenData := model.TokenResponse{
-			UserID:       user.UserID,
-			RefreshToken: hashedRefreshToken,
-			CreatedAt:    time.Now().Unix(),
-			Revoked:      false,
-			ExpiresIn:    refreshTokenClaims["expiresAt"].(int64) - refreshTokenClaims["issuedAt"].(int64),
-		}
-
-		_, err = firestoreClient.Collection("refreshTokens").Doc(strconv.Itoa(user.UserID)).Set(c, refreshTokenData)
-		if err != nil {
-			c.JSON(500, gin.H{"error": "Failed to store refresh token in Firestore"})
-			return
-		}
-
-		role := "user"
-		if user.Role == "admin" {
-			role = user.Role
-		}
-		// สร้างข้อมูลที่ต้องการบันทึกใน Firebase
-		firebaseData := map[string]interface{}{
-			"email":      request.Email,
-			"active":     user.IsActive,
-			"verify":     user.IsVerify,
-			"login":      1,
-			"role":       role,
-			"updated_at": time.Now(),
-		}
-
-		// บันทึกหรืออัปเดตข้อมูลใน Firebase collection "usersLogin"
-		_, err = firestoreClient.Collection("usersLogin").Doc(request.Email).Set(c, firebaseData, firestore.MergeAll)
-		if err != nil {
-			c.JSON(500, gin.H{"error": "Failed to update Firebase user data: " + err.Error()})
-			return
-		}
-
-		c.JSON(200, gin.H{
-			"message": "Login Successfully",
-			"token": gin.H{
-				"accessToken":  accessToken,
-				"refreshToken": refreshToken,
-			},
-		})
 	}
+
+	refreshToken, err := CreateRefreshToken(uint(user.UserID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create refresh token"})
+		return
+	}
+
+	// แฮช refresh token
+	hashedRefreshToken, err := HashRefreshToken(refreshToken)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash refresh token"})
+		return
+	}
+
+	// กำหนดค่าเวลาสำหรับ token
+	now := time.Now()
+	expiresAt := now.Add(7 * 24 * time.Hour).Unix()
+	issuedAt := now.Unix()
+
+	// สร้างข้อมูล refresh token
+	refreshTokenData := model.TokenResponse{
+		UserID:       user.UserID,
+		RefreshToken: hashedRefreshToken,
+		CreatedAt:    issuedAt,
+		Revoked:      false,
+		ExpiresIn:    expiresAt - issuedAt,
+	}
+
+	// บันทึก refresh token ใน Firestore
+	userIDStr := strconv.Itoa(user.UserID)
+	if _, err := firestoreClient.Collection("refreshTokens").Doc(userIDStr).Set(c, refreshTokenData); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store refresh token"})
+		return
+	}
+
+	// กำหนดบทบาทผู้ใช้
+	role := "user"
+	if user.Role == "admin" {
+		role = user.Role
+	}
+
+	// อัปเดตข้อมูลการเข้าสู่ระบบใน Firestore
+	loginData := map[string]interface{}{
+		"email":      request.Email,
+		"active":     user.IsActive,
+		"verify":     user.IsVerify,
+		"login":      1,
+		"role":       role,
+		"updated_at": now,
+	}
+
+	// บันทึกข้อมูลการเข้าสู่ระบบใน Firestore
+	if _, err := firestoreClient.Collection("usersLogin").Doc(request.Email).Set(c, loginData, firestore.MergeAll); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update login status"})
+		return
+	}
+
+	// ส่งผลลัพธ์กลับ
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Login Successfully",
+		"token": gin.H{
+			"accessToken":  accessToken,
+			"refreshToken": refreshToken,
+		},
+	})
 }
 
 func Signup(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -305,7 +337,7 @@ func NewAccessToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 		c.JSON(500, gin.H{"error": "Failed to create new access token"})
 		return
 	}
-	c.JSON(200, gin.H{"accessToken": newAccessToken, "revoke": tokenData.Revoked})
+	c.JSON(200, gin.H{"accessToken": newAccessToken})
 }
 
 func GoogleSignIn(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
