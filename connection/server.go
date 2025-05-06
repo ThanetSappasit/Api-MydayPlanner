@@ -3,6 +3,7 @@ package connection
 import (
 	"log"
 	"mydayplanner/controller/auth"
+	"mydayplanner/controller/board"
 	"mydayplanner/controller/user"
 
 	"github.com/gin-contrib/cors"
@@ -31,6 +32,7 @@ func StartServer() {
 	auth.OTPController(router, DB, FB)
 	auth.CaptchaController(router, DB, FB)
 	user.UserController(router, DB, FB)
+	board.BoardController(router, DB, FB)
 
 	router.Run()
 }
