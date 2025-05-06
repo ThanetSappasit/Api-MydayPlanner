@@ -48,10 +48,10 @@ func CreateAccessToken(userID uint, role string) (string, error) {
 		UserID: userID,
 		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    "mydayplanner",
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Minute)),
-			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(30 * time.Minute)),
+			Issuer:   "mydayplanner",
+			IssuedAt: jwt.NewNumericDate(time.Now()),
+			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(30 * time.Minute)),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -63,10 +63,10 @@ func CreateRefreshToken(userID uint) (string, error) {
 	claims := &model.AccessRefresh{
 		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    "mydayplanner",
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * time.Minute)), // Longer-lived token (7 days)
-			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)), // Longer-lived token (7 days)
+			Issuer:   "mydayplanner",
+			IssuedAt: jwt.NewNumericDate(time.Now()),
+			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * time.Minute)), // Longer-lived token (7 days)
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)), // Longer-lived token (7 days)
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
