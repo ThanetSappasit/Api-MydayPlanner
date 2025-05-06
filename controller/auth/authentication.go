@@ -48,10 +48,10 @@ func CreateAccessToken(userID uint, role string) (string, error) {
 		UserID: userID,
 		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:   "mydayplanner",
-			IssuedAt: jwt.NewNumericDate(time.Now()),
-			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Minute)),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(30 * time.Minute)),
+			Issuer:    "mydayplanner",
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Minute)),
+			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(30 * time.Minute)),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -63,10 +63,10 @@ func CreateRefreshToken(userID uint) (string, error) {
 	claims := &model.AccessRefresh{
 		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:   "mydayplanner",
-			IssuedAt: jwt.NewNumericDate(time.Now()),
-			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * time.Minute)), // Longer-lived token (7 days)
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)), // Longer-lived token (7 days)
+			Issuer:    "mydayplanner",
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(5 * time.Minute)), // Longer-lived token (7 days)
+			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)), // Longer-lived token (7 days)
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -143,10 +143,10 @@ func Signin(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	// ตรวจสอบสถานะบัญชีผู้ใช้
 	switch user.IsActive {
 	case "0":
-		c.JSON(http.StatusForbidden, gin.H{"error": "User account is not active", "status": "0"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User account is not active", "status": "0"})
 		return
 	case "2":
-		c.JSON(http.StatusForbidden, gin.H{"error": "User account is deleted", "status": "2"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "User account is deleted", "status": "2"})
 		return
 	}
 
