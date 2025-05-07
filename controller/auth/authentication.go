@@ -65,7 +65,7 @@ func CreateRefreshToken(userID uint) (string, error) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "mydayplanner",
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * time.Minute)), // Longer-lived token (7 days)
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(2 * time.Minute)), // Longer-lived token (7 days)
 			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)), // Longer-lived token (7 days)
 		},
 	}
@@ -178,7 +178,8 @@ func Signin(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 
 	// กำหนดค่าเวลาสำหรับ token
 	now := time.Now()
-	expiresAt := now.Add(7 * 24 * time.Hour).Unix()
+	expiresAt := now.Add(2 * time.Minute).Unix()
+	// expiresAt := now.Add(7 * 24 * time.Hour).Unix()
 	issuedAt := now.Unix()
 
 	// สร้างข้อมูล refresh token
