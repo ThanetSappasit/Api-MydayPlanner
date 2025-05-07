@@ -50,7 +50,7 @@ func CreateAccessToken(userID uint, role string) (string, error) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "mydayplanner",
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(4 * time.Minute)),
 			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(30 * time.Minute)),
 		},
 	}
