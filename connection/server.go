@@ -2,6 +2,7 @@ package connection
 
 import (
 	"log"
+	"mydayplanner/controller/admin"
 	"mydayplanner/controller/auth"
 	"mydayplanner/controller/board"
 	"mydayplanner/controller/user"
@@ -33,6 +34,7 @@ func StartServer() {
 	auth.CaptchaController(router, DB, FB)
 	user.UserController(router, DB, FB)
 	board.BoardController(router, DB, FB)
+	admin.AdminController(router, DB, FB)
 
 	router.Run()
 }
