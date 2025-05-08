@@ -5,6 +5,7 @@ import (
 	"mydayplanner/controller/admin"
 	"mydayplanner/controller/auth"
 	"mydayplanner/controller/board"
+	"mydayplanner/controller/report"
 	"mydayplanner/controller/user"
 
 	"github.com/gin-contrib/cors"
@@ -35,6 +36,7 @@ func StartServer() {
 	user.UserController(router, DB, FB)
 	board.BoardController(router, DB, FB)
 	admin.AdminController(router, DB, FB)
+	report.ReportController(router, DB, FB)
 
 	router.Run()
 }

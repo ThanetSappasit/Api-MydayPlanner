@@ -10,5 +10,7 @@ type SignupRequest struct {
 	Name     string `json:"name" binding:"required"`
 }
 type GoogleSignInRequest struct {
-	TokenID string `json:"tokenid" binding:"required"`
+	Email   string `json:"email" binding:"required"`
+	Name    string `json:"name"`
+	Profile string `json:"profile"`
 }
