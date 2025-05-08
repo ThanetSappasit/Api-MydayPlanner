@@ -44,7 +44,7 @@ func ReadAllUser(c *gin.Context, db *gorm.DB) {
 		c.JSON(500, gin.H{"error": "Database error"})
 		return
 	}
-	c.JSON(200, gin.H{"users": users})
+	c.JSON(http.StatusOK, users)
 }
 
 func Profile(c *gin.Context, db *gorm.DB) {

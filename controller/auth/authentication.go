@@ -1,8 +1,10 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
+	"log"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
@@ -50,8 +52,7 @@ func CreateAccessToken(userID uint, role string) (string, error) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "mydayplanner",
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(4 * time.Minute)),
-			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(30 * time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(60 * time.Minute)),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -65,8 +66,7 @@ func CreateRefreshToken(userID uint) (string, error) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "mydayplanner",
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(2 * time.Minute)), // Longer-lived token (7 days)
-			// ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)), // Longer-lived token (7 days)
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)), // Longer-lived token (7 days)
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -178,8 +178,7 @@ func Signin(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 
 	// กำหนดค่าเวลาสำหรับ token
 	now := time.Now()
-	expiresAt := now.Add(2 * time.Minute).Unix()
-	// expiresAt := now.Add(7 * 24 * time.Hour).Unix()
+	expiresAt := now.Add(7 * 24 * time.Hour).Unix()
 	issuedAt := now.Unix()
 
 	// สร้างข้อมูล refresh token
@@ -342,104 +341,243 @@ func NewAccessToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 }
 
 func GoogleSignIn(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-	var googleSignInRequest dto.GoogleSignInRequest
-	if err := c.ShouldBindJSON(&googleSignInRequest); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+	// รับและตรวจสอบข้อมูลจาก Request
+	var req dto.GoogleSignInRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "กรุณาระบุข้อมูลให้ครบถ้วนและถูกต้อง",
+		})
+		return
+	}
+
+	// ตรวจสอบข้อมูลที่จำเป็น
+	if req.Email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "กรุณาระบุอีเมล",
+		})
+		return
+	}
+
+	// เริ่ม transaction
+	tx := db.Begin()
+	if tx.Error != nil {
+		log.Printf("Error starting transaction: %v", tx.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "เกิดข้อผิดพลาดในระบบ โปรดลองใหม่อีกครั้ง",
+		})
 		return
 	}
 
 	// ค้นหาผู้ใช้ในฐานข้อมูล
 	var user model.User
-	result := db.Where("email = ?", googleSignInRequest.Email).First(&user)
+	result := tx.Where("email = ?", req.Email).First(&user)
 
-	var firebaseData map[string]interface{}
+	// กำหนดค่าเริ่มต้น
 	role := "user"
-	if user.Role == "admin" {
-		role = user.Role
-	}
-
-	// เงื่อนไขที่ 1: ไม่เจอข้อมูลในระบบ
-	if result.Error != nil {
-		if result.Error == gorm.ErrRecordNotFound {
-			// กรณีไม่พบผู้ใช้ในระบบ
-			isActive := "1"
-			isVerify := "1"
-			createAt := time.Now().UTC()
-
-			var sql = `
-				INSERT INTO user (name, email, profile, hashed_password, role, is_active, is_verify, create_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			`
-			// ต้องhash - ก่อนไหม ค่อยเอาไปเช็คที่หน้าบ้าน??
-			hashedPasswordValue := "-"
-
-			result := db.Exec(sql,
-				googleSignInRequest.Name,
-				googleSignInRequest.Email,
-				googleSignInRequest.Profile,
-				hashedPasswordValue,
-				role,
-				isActive,
-				isVerify,
-				createAt)
-			if result.Error != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
-				return
-			}
-			firebaseData = map[string]interface{}{
-				"email":  googleSignInRequest.Email,
-				"active": isActive,
-				"verify": isVerify,
-				"login":  1,
-				"role":   role,
-			}
-
-			// บันทึกหรืออัปเดตข้อมูลใน Firebase collection "usersLogin"
-			_, err := firestoreClient.Collection("usersLogin").Doc(googleSignInRequest.Email).Set(c, firebaseData, firestore.MergeAll)
-			if err != nil {
-				c.JSON(500, gin.H{"error": "Failed to update Firebase user data: " + err.Error()})
-				return
-			}
-
-			c.JSON(http.StatusOK, gin.H{
-				"status":  "not_found",
-				"message": "User not found in system but registered in Firebase",
-				"email":   googleSignInRequest.Email,
-			})
-		} else {
-			// กรณีเกิด error อื่นๆ
-			c.JSON(http.StatusInternalServerError, gin.H{"error": result.Error.Error()})
-		}
-		return
-	}
-
-	// เงื่อนไขที่ 2: เจอข้อมูลในระบบ
-	// เตรียมข้อมูลสำหรับบันทึกใน Firebase
+	var userID uint
 	isActive := "1"
 	isVerify := "1"
+	now := time.Now()
 
-	firebaseData = map[string]interface{}{
-		"email":  googleSignInRequest.Email,
-		"active": isActive,
-		"verify": isVerify,
-		"login":  1,
-		"role":   role,
+	// กรณีไม่พบผู้ใช้ในระบบ
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		// สร้างผู้ใช้ใหม่
+		newUser := model.User{
+			Name:           req.Name,
+			Email:          req.Email,
+			Profile:        req.Profile,
+			HashedPassword: "-", // Google Sign-In ไม่ต้องใช้รหัสผ่าน
+			Role:           role,
+			IsActive:       isActive,
+			IsVerify:       isVerify,
+			CreatedAt:      now.UTC(),
+		}
+
+		if err := tx.Create(&newUser).Error; err != nil {
+			tx.Rollback()
+			log.Printf("Failed to create user: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"message": "ไม่สามารถลงทะเบียนผู้ใช้ได้",
+			})
+			return
+		}
+
+		// ดึง ID ที่เพิ่งสร้าง
+		userID = uint(newUser.UserID)
+	} else if result.Error != nil {
+		// กรณีเกิดข้อผิดพลาดอื่นๆ
+		tx.Rollback()
+		log.Printf("Database error: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "เกิดข้อผิดพลาดในการตรวจสอบข้อมูล",
+		})
+		return
+	} else {
+		// กรณีพบผู้ใช้ในระบบ
+		userID = uint(user.UserID)
+
+		// ตรวจสอบสถานะบัญชี
+		switch user.IsActive {
+		case "0":
+			tx.Rollback()
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"message": "บัญชีผู้ใช้ถูกระงับการใช้งาน",
+				"status":  "0",
+			})
+			return
+		case "2":
+			tx.Rollback()
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"message": "บัญชีผู้ใช้ถูกลบแล้ว",
+				"status":  "2",
+			})
+			return
+		}
+
+		// ตรวจสอบการยืนยันอีเมล
+		if user.IsVerify != "1" {
+			tx.Rollback()
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"message": "กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ",
+				"status":  "not_verified",
+			})
+			return
+		}
+
+		// ถ้าผู้ใช้เป็น admin ให้คงสถานะไว้
+		if user.Role == "admin" {
+			role = "admin"
+		}
 	}
 
-	// บันทึกหรืออัปเดตข้อมูลใน Firebase collection "usersLogin"
-	_, err := firestoreClient.Collection("usersLogin").Doc(googleSignInRequest.Email).Set(c, firebaseData, firestore.MergeAll)
+	// สร้าง tokens
+	accessToken, err := CreateAccessToken(userID, role)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to update Firebase user data: " + err.Error()})
+		tx.Rollback()
+		log.Printf("Failed to create access token: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "ไม่สามารถสร้างโทเค็นได้",
+		})
 		return
 	}
 
+	refreshToken, err := CreateRefreshToken(userID)
+	if err != nil {
+		tx.Rollback()
+		log.Printf("Failed to create refresh token: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "ไม่สามารถสร้างโทเค็นได้",
+		})
+		return
+	}
+
+	// แฮช refresh token
+	hashedRefreshToken, err := HashRefreshToken(refreshToken)
+	if err != nil {
+		tx.Rollback()
+		log.Printf("Failed to hash refresh token: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "เกิดข้อผิดพลาดในการประมวลผลโทเค็น",
+		})
+		return
+	}
+
+	// กำหนดค่าเวลาสำหรับ token (7 วัน)
+	expiresAt := now.Add(7 * 24 * time.Hour).Unix()
+	issuedAt := now.Unix()
+
+	// สร้างข้อมูล refresh token
+	refreshTokenData := model.TokenResponse{
+		UserID:       int(userID),
+		RefreshToken: hashedRefreshToken,
+		CreatedAt:    issuedAt,
+		Revoked:      false,
+		ExpiresIn:    expiresAt - issuedAt,
+	}
+
+	// Commit transaction database
+	if err := tx.Commit().Error; err != nil {
+		log.Printf("Failed to commit transaction: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "เกิดข้อผิดพลาดในการบันทึกข้อมูล",
+		})
+		return
+	}
+	// บันทึกข้อมูลการเข้าสู่ระบบใน Firestore
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// บันทึก refresh token ใน Firestore
+	userIDStr := strconv.Itoa(int(userID))
+	if _, err := firestoreClient.Collection("refreshTokens").Doc(userIDStr).Set(ctx, refreshTokenData); err != nil {
+		log.Printf("Failed to store refresh token in Firestore: %v", err)
+		// ไม่ต้อง rollback เพราะ transaction ได้ commit ไปแล้ว
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "เกิดข้อผิดพลาดในการบันทึกข้อมูลการเข้าสู่ระบบ",
+		})
+		return
+	}
+
+	// เตรียมข้อมูลสำหรับบันทึกใน Firebase
+	firebaseData := map[string]interface{}{
+		"email":      req.Email,
+		"active":     isActive,
+		"verify":     isVerify,
+		"login":      1,
+		"role":       role,
+		"updated_at": now,
+	}
+
+	// บันทึกข้อมูลการเข้าสู่ระบบใน Firestore
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := firestoreClient.Collection("usersLogin").Doc(req.Email).Set(ctx, firebaseData, firestore.MergeAll); err != nil {
+		log.Printf("Failed to update Firebase user data: %v", err)
+		// ไม่ต้องส่งข้อผิดพลาดกลับไปยังผู้ใช้ เนื่องจากสามารถเข้าสู่ระบบได้แล้ว
+		// การอัปเดตข้อมูลนี้เป็นเพียงข้อมูลเสริม
+	}
+
+	// เตรียมข้อมูลผู้ใช้สำหรับส่งกลับ
+	var userName string
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		userName = req.Name
+	} else {
+		userName = user.Name
+	}
+
+	// ส่งผลลัพธ์กลับ
 	c.JSON(http.StatusOK, gin.H{
-		"status":  "success",
-		"message": "Login successful",
+		"success": true,
+		"message": "เข้าสู่ระบบสำเร็จ",
+		"status": func() string {
+			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return "registered"
+			}
+			return "success"
+		}(),
 		"user": gin.H{
-			"id":    user.UserID,
-			"email": user.Email,
-			"name":  user.Name,
+			"id":    userID,
+			"email": req.Email,
+			"name":  userName,
+			"role":  role,
+		},
+		"token": gin.H{
+			"accessToken":  accessToken,
+			"refreshToken": refreshToken,
+			"expiresIn":    expiresAt - issuedAt,
 		},
 	})
 }
