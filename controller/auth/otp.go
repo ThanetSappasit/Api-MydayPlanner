@@ -257,11 +257,13 @@ func sendEmail(to, subject, body string) error {
 
 // ฟังก์ชันตรวจสอบว่าอีเมลถูกบล็อกหรือไม่
 func isEmailBlocked(c context.Context, firestoreClient *firestore.Client, email string, recordfirebase string) (bool, error) {
-	collectionName := fmt.Sprintf("EmailBlocked_%s", recordfirebase)
-	blockedRef := firestoreClient.Collection(collectionName).Doc(email)
-	blockedDoc, err := blockedRef.Get(c)
+	// เข้าถึง document ของ email ใน collection หลัก
+	mainDoc := firestoreClient.Collection("EmailBlocked_").Doc(email)
+	subCollection := mainDoc.Collection(fmt.Sprintf("EmailBlocked_%s", recordfirebase))
+	blockedRef := subCollection.Doc(email)
 
-	// ถ้าไม่พบข้อมูล แสดงว่าไม่ถูกบล็อก
+	// ดึงข้อมูลจาก Firestore
+	blockedDoc, err := blockedRef.Get(c)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return false, nil
@@ -269,17 +271,16 @@ func isEmailBlocked(c context.Context, firestoreClient *firestore.Client, email 
 		return false, err
 	}
 
-	// ถ้าพบข้อมูล ตรวจสอบว่าหมดเวลาบล็อกหรือยัง
+	// ตรวจสอบข้อมูล
 	if blockedDoc.Exists() {
 		blockData := blockedDoc.Data()
 		expiresAt, ok := blockData["expiresAt"].(time.Time)
 		if ok {
-			// ถ้ายังไม่หมดเวลา ถือว่ายังถูกบล็อกอยู่
 			if time.Now().Before(expiresAt) {
 				return true, nil
 			}
 
-			// ถ้าหมดเวลาแล้ว ลบออกจาก EmailBlocked
+			// ลบบันทึกถ้าหมดเวลาแล้ว
 			_, err = blockedRef.Delete(c)
 			if err != nil {
 				return false, err
@@ -292,10 +293,12 @@ func isEmailBlocked(c context.Context, firestoreClient *firestore.Client, email 
 
 // ฟังก์ชันตรวจสอบจำนวนครั้งที่ขอ OTP และบล็อกถ้าเกินกำหนด
 func checkAndBlockIfNeeded(c context.Context, firestoreClient *firestore.Client, email string, record string) (bool, error) {
-	// ค้นหารายการ OTP ที่มีอีเมลตรงกัน
-	collectionName := fmt.Sprintf("OTPRecords_%s", record)
-	query := firestoreClient.Collection(collectionName).Where("email", "==", email)
-	iter := query.Documents(c)
+	// เข้าถึง subcollection ใน document ของ email
+	mainDoc := firestoreClient.Collection("OTPRecords").Doc(email)
+	subCollection := mainDoc.Collection(fmt.Sprintf("OTPRecords_%s", record))
+
+	// อ่านทุก document ใน subcollection
+	iter := subCollection.Documents(c)
 	defer iter.Stop()
 
 	var otpCount int
@@ -310,24 +313,18 @@ func checkAndBlockIfNeeded(c context.Context, firestoreClient *firestore.Client,
 			return false, err
 		}
 
-		// ดึงข้อมูลจากเอกสาร
 		data := doc.Data()
-
-		// ตรวจสอบว่ามีฟิลด์ expiresAt หรือไม่
 		expiresAt, ok := data["expiresAt"].(time.Time)
 		if !ok {
-			// ถ้าไม่มีวันหมดอายุหรือรูปแบบไม่ถูกต้อง ให้นับว่าใช้ได้อยู่
 			otpCount++
 			continue
 		}
 
-		// ตรวจสอบว่ายังไม่หมดอายุหรือไม่
 		if currentTime.Before(expiresAt) {
 			otpCount++
 		}
 	}
 
-	// ถ้าจำนวน OTP ที่ยังไม่หมดอายุมากกว่า 3 รายการ ให้บล็อกอีเมล
 	if otpCount >= 3 {
 		err := blockEmail(c, firestoreClient, email, record)
 		if err != nil {
@@ -349,8 +346,10 @@ func blockEmail(c context.Context, firestoreClient *firestore.Client, email stri
 		"createdAt": blockTime,
 		"expiresAt": expireTime,
 	}
-	collectionName := fmt.Sprintf("EmailBlocked_%s", record)
-	_, err := firestoreClient.Collection(collectionName).Doc(email).Set(c, blockData)
+
+	mainDoc := firestoreClient.Collection("EmailBlocked_").Doc(email)
+	subCollection := mainDoc.Collection(fmt.Sprintf("EmailBlocked_%s", record))
+	_, err := subCollection.Doc(email).Set(c, blockData)
 
 	return err
 
@@ -368,8 +367,9 @@ func saveOTPRecord(c context.Context, firestoreClient *firestore.Client, email, 
 		"expiresAt": expirationTime,
 	}
 
-	collectionName := fmt.Sprintf("OTPRecords_%s", record)
-	_, err := firestoreClient.Collection(collectionName).Doc(ref).Set(c, otpData)
+	mainDoc := firestoreClient.Collection("OTPRecords").Doc(email)
+	subCollection := mainDoc.Collection(fmt.Sprintf("OTPRecords_%s", record))
+	_, err := subCollection.Doc(ref).Set(c, otpData)
 	return err
 }
 
