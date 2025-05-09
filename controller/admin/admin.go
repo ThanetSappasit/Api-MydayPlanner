@@ -19,6 +19,9 @@ func AdminController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore
 		routes.PUT("/disableactive/:id", middleware.AdminMiddleware(), func(c *gin.Context) {
 			DisableUser(c, db, firestoreClient)
 		})
+		routes.PUT("/deleteaccount/:id", middleware.AdminMiddleware(), func(c *gin.Context) {
+			DeleteUser(c, db, firestoreClient)
+		})
 		routes.POST("/createadmin", middleware.AdminMiddleware(), func(c *gin.Context) {
 			CreateAdmin(c, db, firestoreClient)
 		})
@@ -126,5 +129,56 @@ func CreateAdmin(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 		"message": "Admin user created successfully",
 		"email":   req.Email,
 		"role":    "admin",
+	})
+}
+
+func DeleteUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.Param("id")
+	if userId == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "User ID is required"})
+		return
+	}
+	// ค้นหาผู้ใช้ในฐานข้อมูลโดยใช้ email
+	var user model.User
+	result := db.First(&user, userId)
+	if result.Error != nil {
+		c.JSON(500, gin.H{"error": "Database error"})
+		return
+	}
+
+	// สลับสถานะการใช้งาน (toggle)
+	newStatus := "1"
+	if user.IsActive == "1" || user.IsActive == "0" {
+		newStatus = "2"
+	}
+
+	// อัปเดตสถานะในฐานข้อมูลด้วยคำสั่ง SQL เดียว
+	if err := db.Model(&user).Update("is_active", newStatus).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user status"})
+		return
+	}
+
+	// อัปเดตเฉพาะฟิลด์ active ใน Firestore
+	_, err := firestoreClient.Collection("usersLogin").Doc(user.Email).Update(c, []firestore.Update{
+		{
+			Path:  "active",
+			Value: newStatus,
+		},
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update Firestore document"})
+		return
+	}
+
+	// ส่งข้อความตอบกลับที่เหมาะสม
+	message := "User enabled successfully"
+	if newStatus == "0" {
+		message = "User disabled successfully"
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": message,
+		"status":  newStatus,
 	})
 }
