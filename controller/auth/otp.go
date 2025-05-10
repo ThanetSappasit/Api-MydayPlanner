@@ -552,8 +552,10 @@ func VerifyOTP(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 
 	// ดึงข้อมูล OTP จาก Firebase โดยใช้ reference
 	ctx := c.Request.Context() // ใช้ context จาก request แทนการส่ง c ไปโดยตรง
-	collectionName := fmt.Sprintf("OTPRecords_%s", recordfirebase)
-	docRef := firestoreClient.Collection(collectionName).Doc(verifyRequest.Reference)
+	mainDoc := firestoreClient.Collection("OTPRecords").Doc(verifyRequest.Email)
+	subCollection := mainDoc.Collection(fmt.Sprintf("OTPRecords_%s", recordfirebase))
+	docRef := subCollection.Doc(verifyRequest.Reference)
+
 	docSnap, err := docRef.Get(ctx)
 
 	if err != nil {
@@ -609,7 +611,7 @@ func VerifyOTP(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	}
 
 	// อัปเดตสถานะ OTP ว่าถูกใช้แล้ว
-	_, err = firestoreClient.Collection(collectionName).Doc(verifyRequest.Reference).Update(ctx, []firestore.Update{
+	_, err = docRef.Update(ctx, []firestore.Update{
 		{Path: "is_used", Value: "1"},
 	})
 
@@ -626,7 +628,7 @@ func VerifyOTP(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	}
 
 	// เงื่อนไขพิเศษสำหรับ OTPRecords_verify
-	if collectionName == "OTPRecords_verify" {
+	if recordfirebase == "verify" {
 		// อัปเดตคอลัมน์ is_verify เป็น 1 ในตาราง user ของ SQL database
 		result := tx.Model(&model.User{}).Where("email = ?", otpRecord.Email).Update("is_verify", 1)
 
