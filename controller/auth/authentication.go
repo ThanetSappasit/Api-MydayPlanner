@@ -55,7 +55,7 @@ func CreateAccessToken(userID uint, role string) (string, error) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "mydayplanner",
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(60 * time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(2 * time.Minute)),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
