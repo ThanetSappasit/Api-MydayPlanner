@@ -258,7 +258,7 @@ func sendEmail(to, subject, body string) error {
 // ฟังก์ชันตรวจสอบว่าอีเมลถูกบล็อกหรือไม่
 func isEmailBlocked(c context.Context, firestoreClient *firestore.Client, email string, recordfirebase string) (bool, error) {
 	// เข้าถึง document ของ email ใน collection หลัก
-	mainDoc := firestoreClient.Collection("EmailBlocked_").Doc(email)
+	mainDoc := firestoreClient.Collection("EmailBlocked").Doc(email)
 	subCollection := mainDoc.Collection(fmt.Sprintf("EmailBlocked_%s", recordfirebase))
 	blockedRef := subCollection.Doc(email)
 
@@ -347,7 +347,7 @@ func blockEmail(c context.Context, firestoreClient *firestore.Client, email stri
 		"expiresAt": expireTime,
 	}
 
-	mainDoc := firestoreClient.Collection("EmailBlocked_").Doc(email)
+	mainDoc := firestoreClient.Collection("EmailBlocked").Doc(email)
 	subCollection := mainDoc.Collection(fmt.Sprintf("EmailBlocked_%s", record))
 	_, err := subCollection.Doc(email).Set(c, blockData)
 
