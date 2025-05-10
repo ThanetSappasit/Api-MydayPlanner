@@ -34,6 +34,9 @@ func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 			DeleteUser(c, db, firestoreClient)
 		})
 	}
+	router.POST("/email", func(c *gin.Context) {
+		EmailData(c, db)
+	})
 }
 
 func ReadAllUser(c *gin.Context, db *gorm.DB) {
@@ -56,6 +59,25 @@ func Profile(c *gin.Context, db *gorm.DB) {
 		return
 	}
 	c.JSON(200, gin.H{"user": user})
+}
+
+func EmailData(c *gin.Context, db *gorm.DB) {
+	var email dto.EmailRequest
+	if err := c.ShouldBindJSON(&email); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	var user model.User
+	result := db.First(&user, email)
+	if result.Error != nil {
+		c.JSON(500, gin.H{"error": "Database error"})
+		return
+	}
+	response := gin.H{
+		"UserID": user.UserID,
+		"Email":  user.Email,
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func GetUserAllData(c *gin.Context, db *gorm.DB) {

@@ -427,7 +427,7 @@ func GoogleSignIn(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 			tx.Rollback()
 			c.JSON(http.StatusForbidden, gin.H{
 				"success": false,
-				"message": "บัญชีผู้ใช้ถูกระงับการใช้งาน",
+				"message": "user account is not active",
 				"status":  "0",
 			})
 			return
@@ -435,19 +435,8 @@ func GoogleSignIn(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 			tx.Rollback()
 			c.JSON(http.StatusForbidden, gin.H{
 				"success": false,
-				"message": "บัญชีผู้ใช้ถูกลบแล้ว",
+				"message": "user account is deleted",
 				"status":  "2",
-			})
-			return
-		}
-
-		// ตรวจสอบการยืนยันอีเมล
-		if user.IsVerify != "1" {
-			tx.Rollback()
-			c.JSON(http.StatusForbidden, gin.H{
-				"success": false,
-				"message": "กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ",
-				"status":  "not_verified",
 			})
 			return
 		}
