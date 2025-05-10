@@ -41,6 +41,9 @@ func AuthController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 		routes.POST("/googlelogin", func(c *gin.Context) {
 			GoogleSignIn(c, db, firestoreClient)
 		})
+		routes.PUT("/resetpassword", func(c *gin.Context) {
+			ResetPassword(c, db, firestoreClient)
+		})
 	}
 }
 
@@ -569,4 +572,36 @@ func GoogleSignIn(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 			"expiresIn":    expiresAt - issuedAt,
 		},
 	})
+}
+
+func ResetPassword(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	var resetPassword dto.ResetPasswordRequest
+	if err := c.ShouldBindJSON(&resetPassword); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	var user model.User
+	result := db.Where("email = ?", resetPassword.Email).First(&user)
+	if result.Error != nil {
+		if result.Error == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": result.Error.Error()})
+		}
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(resetPassword.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+		return
+	}
+
+	if err := db.Model(&user).Update("hashed_password", hashedPassword).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update password"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully"})
 }
