@@ -281,10 +281,29 @@ func Signup(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 
 func Signout(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
+	var user model.User
+	result := db.First(&user, userId)
+	if result.Error != nil {
+		if result.Error == gorm.ErrRecordNotFound {
+			c.JSON(404, gin.H{"error": "User not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": "Database error"})
+		return
+	}
 	docRef := firestoreClient.Collection("refreshTokens").Doc(strconv.Itoa(int(userId)))
 	_, err := docRef.Delete(c)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to delete refresh token"})
+		return
+	}
+	// อัปเดตข้อมูลการเข้าสู่ระบบใน Firestore ให้ login = 0
+	loginData := map[string]interface{}{
+		"login": 0,
+	}
+
+	if _, err := firestoreClient.Collection("usersLogin").Doc(user.Email).Set(c, loginData, firestore.MergeAll); err != nil {
+		c.JSON(500, gin.H{"error": "Failed to update login status"})
 		return
 	}
 	c.JSON(200, gin.H{"message": "Signout successfully"})
