@@ -7,6 +7,6 @@ type GetBoardsRequest struct {
 
 type CreateBoardRequest struct {
 	BoardName string `json:"board_name" validate:"required"`
-	CreatedBy string `json:"created_by" validate:"required"`
+	CreatedBy int    `json:"created_by" validate:"required"`
 	Is_group  string `json:"is_group"`
 }
