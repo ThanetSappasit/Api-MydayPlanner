@@ -5,6 +5,7 @@ import (
 	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
+	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
@@ -83,9 +84,19 @@ func EmailData(c *gin.Context, db *gorm.DB) {
 func GetUserAllData(c *gin.Context, db *gorm.DB) {
 	userId := c.MustGet("userId").(uint)
 
-	// Get user profile
-	var user model.User
-	if err := db.First(&user, userId).Error; err != nil {
+	// Get user profile with only required fields
+	var user struct {
+		UserID    uint      `json:"UserID"`
+		Name      string    `json:"Name"`
+		Email     string    `json:"Email"`
+		Profile   string    `json:"Profile"`
+		Role      string    `json:"Role"`
+		CreatedAt time.Time `json:"CreatedAt"`
+	}
+	if err := db.Table("user").
+		Select("user_id, name, email, profile, role, create_at").
+		Where("user_id = ?", userId).
+		Scan(&user).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"success": false,
 			"message": "User not found",
@@ -93,10 +104,15 @@ func GetUserAllData(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	// Get boards where user is a member (boardgroup)
-	var boardGroup []model.Board
+	// Get boards where user is a member (boardgroup) with only required fields
+	var boardGroup []struct {
+		BoardID   int       `json:"BoardID"`
+		BoardName string    `json:"BoardName"`
+		CreatedAt time.Time `json:"CreatedAt"`
+		CreatedBy uint      `json:"CreatedBy"`
+	}
 	if err := db.Table("board_user").
-		Select("board.*").
+		Select("board.board_id, board.board_name, board.create_at, board.create_by as created_by").
 		Joins("JOIN board ON board_user.board_id = board.board_id").
 		Where("board_user.user_id = ?", userId).
 		Scan(&boardGroup).Error; err != nil {
@@ -108,28 +124,6 @@ func GetUserAllData(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	// Fetch boardIds to get complete board information with preloaded Creator
-	var boardIds []int
-	for _, board := range boardGroup {
-		boardIds = append(boardIds, board.BoardID)
-	}
-
-	// Now fetch complete board information with preloaded Creator with selected fields
-	if len(boardIds) > 0 {
-		var completeBoardGroup []model.Board
-		if err := db.Preload("Creator", func(db *gorm.DB) *gorm.DB {
-			return db.Select("user_id, name, profile")
-		}).Where("board_id IN ?", boardIds).Find(&completeBoardGroup).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"success": false,
-				"message": "Failed to retrieve complete board information",
-				"error":   err.Error(),
-			})
-			return
-		}
-		boardGroup = completeBoardGroup
-	}
-
 	// Extract board IDs from boardGroup to exclude them from the board query
 	var boardGroupIds []int
 	for _, board := range boardGroup {
@@ -137,14 +131,22 @@ func GetUserAllData(c *gin.Context, db *gorm.DB) {
 	}
 
 	// Get boards created by the user, excluding those in boardgroup
-	var boards []model.Board
-	query := db.Preload("Creator", func(db *gorm.DB) *gorm.DB {
-		return db.Select("user_id, name, profile")
-	}).Where("create_by = ?", userId)
+	var boards []struct {
+		BoardID   int       `json:"BoardID"`
+		BoardName string    `json:"BoardName"`
+		CreatedAt time.Time `json:"CreatedAt"`
+		CreatedBy uint      `json:"CreatedBy"`
+	}
+
+	query := db.Table("board").
+		Select("board_id, board_name, create_at, create_by as created_by").
+		Where("create_by = ?", userId)
+
 	if len(boardGroupIds) > 0 {
 		query = query.Where("board_id NOT IN ?", boardGroupIds)
 	}
-	if err := query.Find(&boards).Error; err != nil {
+
+	if err := query.Scan(&boards).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Failed to retrieve boards",
@@ -153,14 +155,11 @@ func GetUserAllData(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	// Prepare response
+	// Return the data directly without the success wrapper
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"data": gin.H{
-			"user":       user,
-			"board":      boards,     // Boards created by user (excluding those in boardgroup)
-			"boardgroup": boardGroup, // Boards where user is a member
-		},
+		"board":      boards,
+		"boardgroup": boardGroup,
+		"user":       user,
 	})
 }
 

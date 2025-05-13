@@ -23,6 +23,9 @@ func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore
 		routes.POST("/create", func(c *gin.Context) {
 			CreateBoardsFirebase(c, db, firestoreClient)
 		})
+		routes.DELETE("/delete/:boardID", func(c *gin.Context) {
+			DeleteBoard(c, db, firestoreClient)
+		})
 	}
 }
 
@@ -50,6 +53,17 @@ func GetBoards(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch member boards"})
 		return
 	}
+
+	var memberBoardsList []gin.H
+	for _, memberBoards := range memberBoards {
+		memberBoardsList = append(memberBoardsList, gin.H{
+			"board_id":   memberBoards.BoardID,
+			"board_name": memberBoards.BoardName,
+			"created_by": memberBoards.CreatedBy,
+			"created_at": memberBoards.CreatedAt,
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"created_boards": createdBoards,
 		"member_boards":  memberBoards,
@@ -135,4 +149,88 @@ func CreateBoardsFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestor
 		"boardID": newBoard.BoardID,
 	})
 
+}
+
+func DeleteBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	// Get user ID from token and board ID from path parameter
+	userID := c.MustGet("userId").(uint)
+	boardIDStr := c.Param("boardID")
+
+	// Convert boardID from string to int
+	boardID, err := strconv.Atoi(boardIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid board ID"})
+		return
+	}
+
+	// Begin transaction
+	tx := db.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+
+	// Check if board exists
+	var board model.Board
+	if err := tx.Where("board_id = ?", boardID).First(&board).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusNotFound, gin.H{"error": "Board not found"})
+		return
+	}
+
+	// Check if user is authorized to delete (only the creator can delete)
+	if board.CreatedBy != int(userID) {
+		tx.Rollback()
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not authorized to delete this board"})
+		return
+	}
+
+	// Check if it's a group board by looking for entries in board_user
+	var boardUsers []model.BoardUser
+	if err := tx.Where("board_id = ?", boardID).Find(&boardUsers).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check board type"})
+		return
+	}
+
+	// Determine board type for Firestore deletion
+	boardType := "Private"
+	if len(boardUsers) > 0 {
+		boardType = "Group"
+
+		// Delete all board_user entries for this board
+		if err := tx.Where("board_id = ?", boardID).Delete(&model.BoardUser{}).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete board users"})
+			return
+		}
+	}
+
+	// Delete the board from the database
+	if err := tx.Delete(&board).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete board"})
+		return
+	}
+
+	// Delete from Firestore
+	mainDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(int(userID)))
+	subCollection := mainDoc.Collection(fmt.Sprintf("%s_Boards", boardType))
+	_, err = subCollection.Doc(boardIDStr).Delete(c)
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete board from Firestore"})
+		return
+	}
+
+	// Commit the transaction
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Board deleted successfully",
+	})
 }
