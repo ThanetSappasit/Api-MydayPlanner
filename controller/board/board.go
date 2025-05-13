@@ -1,6 +1,7 @@
 package board
 
 import (
+	"context"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
@@ -77,51 +78,83 @@ func CreateBoardsFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestor
 		return
 	}
 
-	var user model.User
-	if err := db.Where("user_id = ?", board.CreatedBy).First(&user).Error; err != nil {
+	// สร้าง context ที่มี timeout เพื่อป้องกันการรอนานเกินไป
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	// 1. ลดการ query ข้อมูล user โดยเลือกเฉพาะข้อมูลที่จำเป็น
+	var user struct {
+		UserID int
+		Name   string
+	}
+	if err := db.Table("user").Select("user_id, name").Where("user_id = ?", board.CreatedBy).First(&user).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
-	tx := db.Begin()
-	if tx.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
-		return
-	}
-
+	// เตรียมข้อมูลก่อนเริ่ม transaction
 	newBoard := model.Board{
 		BoardName: board.BoardName,
 		CreatedBy: user.UserID,
 		CreatedAt: time.Now(),
 	}
 
-	if err := tx.Create(&newBoard).Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create board"})
-		return
+	// แปลงค่า is_group เป็นชื่อ collection
+	groupType := "Private"
+	if board.Is_group == "1" {
+		groupType = "Group"
 	}
 
-	if board.Is_group == "1" {
-		boardUser := model.BoardUser{
-			BoardID: newBoard.BoardID, // Assuming ID is the primary key field in your Board model
-			UserID:  user.UserID,
-			AddedAt: time.Now(),
-		}
+	// 2. สร้าง transaction แยกสำหรับ PostgreSQL
+	errChan := make(chan error, 2) // ช่องสำหรับรับ error จากทั้ง goroutine
 
-		if err := tx.Create(&boardUser).Error; err != nil {
-			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add user to board"})
+	// 3. ดำเนินการ transaction ใน PostgreSQL ผ่าน goroutine
+	go func() {
+		tx := db.Begin()
+		if tx.Error != nil {
+			errChan <- tx.Error
 			return
 		}
-	}
+		defer func() {
+			if r := recover(); r != nil {
+				tx.Rollback()
+				if err, ok := r.(error); ok {
+					errChan <- err
+				} else {
+					errChan <- fmt.Errorf("panic in PostgreSQL transaction: %v", r)
+				}
+			}
+		}()
 
-	switch board.Is_group {
-	case "1":
-		board.Is_group = "Group"
-	case "0":
-		board.Is_group = "Private"
-	}
+		if err := tx.Create(&newBoard).Error; err != nil {
+			tx.Rollback()
+			errChan <- err
+			return
+		}
 
+		if board.Is_group == "1" {
+			boardUser := model.BoardUser{
+				BoardID: newBoard.BoardID,
+				UserID:  user.UserID,
+				AddedAt: time.Now(),
+			}
+
+			if err := tx.Create(&boardUser).Error; err != nil {
+				tx.Rollback()
+				errChan <- err
+				return
+			}
+		}
+
+		if err := tx.Commit().Error; err != nil {
+			tx.Rollback()
+			errChan <- err
+			return
+		}
+		errChan <- nil // แจ้งว่าทำงานสำเร็จ
+	}()
+
+	// 4. ขณะเดียวกัน เตรียมข้อมูลสำหรับ Firebase แล้วเขียนลง Firestore
 	boardDataFirebase := gin.H{
 		"BoardID":   newBoard.BoardID,
 		"BoardName": newBoard.BoardName,
@@ -129,26 +162,39 @@ func CreateBoardsFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestor
 		"CreatedAt": user.Name,
 	}
 
-	mainDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(board.CreatedBy))
-	subCollection := mainDoc.Collection(fmt.Sprintf("%s_Boards", board.Is_group))
-	_, err := subCollection.Doc(strconv.Itoa(newBoard.BoardID)).Set(c, boardDataFirebase)
-	if err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add user to Firestore"})
+	go func() {
+		mainDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(board.CreatedBy))
+		subCollection := mainDoc.Collection(fmt.Sprintf("%s_Boards", groupType))
+		_, err := subCollection.Doc(strconv.Itoa(newBoard.BoardID)).Set(ctx, boardDataFirebase)
+		errChan <- err // แจ้งผลลัพธ์ (nil หรือ error)
+	}()
+
+	// รอผลลัพธ์จากทั้งสอง goroutine
+	var postgresErr, firestoreErr error
+	for i := 0; i < 2; i++ {
+		if err := <-errChan; err != nil {
+			if i == 0 {
+				postgresErr = err
+			} else {
+				firestoreErr = err
+			}
+		}
+	}
+
+	// ตรวจสอบ error และส่งผลลัพธ์
+	if postgresErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error: " + postgresErr.Error()})
+		return
+	}
+	if firestoreErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Firestore error: " + firestoreErr.Error()})
 		return
 	}
 
-	// Commit the transaction
-	if err := tx.Commit().Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
-		return
-	}
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "Board created successfully",
 		"boardID": newBoard.BoardID,
 	})
-
 }
 
 func DeleteBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
