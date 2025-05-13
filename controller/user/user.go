@@ -155,6 +155,25 @@ func GetUserAllData(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
+	// Ensure board and boardgroup are always arrays, never null
+	if boards == nil {
+		boards = []struct {
+			BoardID   int       `json:"BoardID"`
+			BoardName string    `json:"BoardName"`
+			CreatedAt time.Time `json:"CreatedAt"`
+			CreatedBy uint      `json:"CreatedBy"`
+		}{}
+	}
+
+	if boardGroup == nil {
+		boardGroup = []struct {
+			BoardID   int       `json:"BoardID"`
+			BoardName string    `json:"BoardName"`
+			CreatedAt time.Time `json:"CreatedAt"`
+			CreatedBy uint      `json:"CreatedBy"`
+		}{}
+	}
+
 	// Return the data directly without the success wrapper
 	c.JSON(http.StatusOK, gin.H{
 		"board":      boards,
