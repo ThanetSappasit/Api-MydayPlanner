@@ -39,6 +39,7 @@ func StartServer() {
 	admin.AdminController(router, DB, FB)
 	report.ReportController(router, DB, FB)
 	task.TaskController(router, DB, FB)
+	task.TodayTaskController(router, DB, FB)
 
 	router.Run()
 }

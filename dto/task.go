@@ -8,3 +8,24 @@ type CreateTaskRequest struct {
 	Priority   string `json:"priority"`
 	CreatedBy  int    `json:"created_by" binding:"required"`
 }
+
+type CreateTodayTaskRequest struct {
+	Email      string `json:"email" binding:"required"`
+	TaskName   string `json:"task_name" binding:"required"`
+	Desciption string `json:"description"`
+	Status     string `json:"status" binding:"required"`
+	Priority   string `json:"priority"`
+}
+
+type DataTodayTaskRequest struct {
+	Email string `json:"email" binding:"required"`
+}
+type DataTodayTaskByNameRequest struct {
+	Email    string `json:"email" binding:"required"`
+	TaskName string `json:"task_name" binding:"required"`
+}
+
+type FinishTodayTaskRequest struct {
+	Email    string `json:"email" binding:"required"`
+	TaskName string `json:"task_name" binding:"required"`
+}
