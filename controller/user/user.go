@@ -104,8 +104,147 @@ func GetUserAllData(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	// Get boards where user is a member (boardgroup) with only required fields
-	var boardGroup []struct {
+	// Define Checklist struct without AssignedUser info
+	type ChecklistWithUser struct {
+		ChecklistID   int       `json:"ChecklistID"`
+		ChecklistName string    `json:"ChecklistName"`
+		IsArchive     bool      `json:"IsArchive"`
+		CreateAt      time.Time `json:"CreateAt"`
+	}
+
+	// Define Attachment struct
+	type AttachmentData struct {
+		AttachmentID int       `json:"AttachmentID"`
+		FileName     string    `json:"FileName"`
+		FilePath     string    `json:"FilePath"`
+		FileType     string    `json:"FileType"`
+		UploadAt     time.Time `json:"UploadAt"`
+	}
+
+	// Define Task struct with Creator info, Checklist and Attachments
+	type TaskWithDetails struct {
+		TaskID      int       `json:"TaskID"`
+		TaskName    string    `json:"TaskName"`
+		Description string    `json:"Description"`
+		Status      string    `json:"Status"`
+		Priority    string    `json:"Priority"`
+		CreateAt    time.Time `json:"CreateAt"`
+		CreateBy    []struct {
+			UserID  int    `json:"UserID"`
+			Name    string `json:"Name"`
+			Profile string `json:"Profile"`
+		} `json:"CreateBy"`
+		Checklist   []ChecklistWithUser `json:"checklist"`
+		Attachments []AttachmentData    `json:"attachments"`
+	}
+
+	// Define Board struct with Tasks
+	type BoardWithTasks struct {
+		BoardID   int               `json:"BoardID"`
+		BoardName string            `json:"BoardName"`
+		CreatedAt time.Time         `json:"CreatedAt"`
+		CreatedBy uint              `json:"CreatedBy"`
+		Tasks     []TaskWithDetails `json:"tasks"`
+	}
+
+	// Helper function to get tasks with details for a board
+	getTasksForBoard := func(boardID int) ([]TaskWithDetails, error) {
+		// Get tasks for this board
+		var tasks []struct {
+			TaskID         int       `json:"task_id"`
+			TaskName       string    `json:"task_name"`
+			Description    string    `json:"description"`
+			Status         string    `json:"status"`
+			Priority       string    `json:"priority"`
+			CreateAt       time.Time `json:"create_at"`
+			CreateBy       int       `json:"create_by"`
+			CreatorUserID  int       `json:"creator_user_id"`
+			CreatorName    string    `json:"creator_name"`
+			CreatorProfile string    `json:"creator_profile"`
+		}
+
+		if err := db.Table("tasks").
+			Select("tasks.task_id, tasks.task_name, tasks.description, tasks.status, tasks.priority, tasks.create_at, tasks.create_by, user.user_id as creator_user_id, user.name as creator_name, user.profile as creator_profile").
+			Joins("LEFT JOIN user ON tasks.create_by = user.user_id").
+			Where("tasks.board_id = ?", boardID).
+			Scan(&tasks).Error; err != nil {
+			return nil, err
+		}
+
+		var taskDetails []TaskWithDetails
+		for _, task := range tasks {
+			taskWithDetails := TaskWithDetails{
+				TaskID:      task.TaskID,
+				TaskName:    task.TaskName,
+				Description: task.Description,
+				Status:      task.Status,
+				Priority:    task.Priority,
+				CreateAt:    task.CreateAt,
+				CreateBy: []struct {
+					UserID  int    `json:"UserID"`
+					Name    string `json:"Name"`
+					Profile string `json:"Profile"`
+				}{
+					{
+						UserID:  task.CreatorUserID,
+						Name:    task.CreatorName,
+						Profile: task.CreatorProfile,
+					},
+				},
+			}
+
+			// Get checklists for this task (without assigned user info)
+			var checklists []struct {
+				ChecklistID   int       `json:"checklist_id"`
+				ChecklistName string    `json:"checklist_name"`
+				IsArchive     bool      `json:"is_archive"`
+				CreateAt      time.Time `json:"create_at"`
+			}
+
+			if err := db.Table("checklists").
+				Select("checklists.checklist_id, checklists.checklist_name, checklists.is_archive, checklists.create_at").
+				Where("checklists.task_id = ?", task.TaskID).
+				Scan(&checklists).Error; err != nil {
+				return nil, err
+			}
+
+			// Initialize as empty array to prevent null
+			taskWithDetails.Checklist = make([]ChecklistWithUser, 0)
+
+			// Convert checklists to ChecklistWithUser format (without AssignedTo)
+			for _, checklist := range checklists {
+				checklistWithUser := ChecklistWithUser{
+					ChecklistID:   checklist.ChecklistID,
+					ChecklistName: checklist.ChecklistName,
+					IsArchive:     checklist.IsArchive,
+					CreateAt:      checklist.CreateAt,
+				}
+				taskWithDetails.Checklist = append(taskWithDetails.Checklist, checklistWithUser)
+			}
+
+			// Get attachments for this task
+			var attachments []AttachmentData
+			if err := db.Table("attachments").
+				Select("attachment_id, file_name, file_path, file_type, upload_at").
+				Where("tasks_id = ?", task.TaskID).
+				Scan(&attachments).Error; err != nil {
+				return nil, err
+			}
+
+			// Initialize as empty array to prevent null
+			taskWithDetails.Attachments = make([]AttachmentData, 0)
+			if len(attachments) > 0 {
+				taskWithDetails.Attachments = attachments
+			}
+
+			taskDetails = append(taskDetails, taskWithDetails)
+		}
+
+		return taskDetails, nil
+	}
+
+	// Get boards where user is a member (boardgroup)
+	var boardGroupData []struct {
 		BoardID   int       `json:"BoardID"`
 		BoardName string    `json:"BoardName"`
 		CreatedAt time.Time `json:"CreatedAt"`
@@ -115,7 +254,7 @@ func GetUserAllData(c *gin.Context, db *gorm.DB) {
 		Select("board.board_id, board.board_name, board.create_at, board.create_by as created_by").
 		Joins("JOIN board ON board_user.board_id = board.board_id").
 		Where("board_user.user_id = ?", userId).
-		Scan(&boardGroup).Error; err != nil {
+		Scan(&boardGroupData).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Failed to retrieve board groups",
@@ -124,14 +263,37 @@ func GetUserAllData(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	// Extract board IDs from boardGroup to exclude them from the board query
+	// Process boardgroup
+	var boardGroup []BoardWithTasks
+	for _, board := range boardGroupData {
+		tasks, err := getTasksForBoard(board.BoardID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"message": "Failed to retrieve tasks for board group",
+				"error":   err.Error(),
+			})
+			return
+		}
+
+		boardWithTasks := BoardWithTasks{
+			BoardID:   board.BoardID,
+			BoardName: board.BoardName,
+			CreatedAt: board.CreatedAt,
+			CreatedBy: board.CreatedBy,
+			Tasks:     tasks,
+		}
+		boardGroup = append(boardGroup, boardWithTasks)
+	}
+
+	// Extract board IDs from boardGroup to exclude them
 	var boardGroupIds []int
 	for _, board := range boardGroup {
 		boardGroupIds = append(boardGroupIds, board.BoardID)
 	}
 
 	// Get boards created by the user, excluding those in boardgroup
-	var boards []struct {
+	var boardsData []struct {
 		BoardID   int       `json:"BoardID"`
 		BoardName string    `json:"BoardName"`
 		CreatedAt time.Time `json:"CreatedAt"`
@@ -146,7 +308,7 @@ func GetUserAllData(c *gin.Context, db *gorm.DB) {
 		query = query.Where("board_id NOT IN ?", boardGroupIds)
 	}
 
-	if err := query.Scan(&boards).Error; err != nil {
+	if err := query.Scan(&boardsData).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Failed to retrieve boards",
@@ -155,26 +317,38 @@ func GetUserAllData(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	// Ensure board and boardgroup are always arrays, never null
+	// Process boards
+	var boards []BoardWithTasks
+	for _, board := range boardsData {
+		tasks, err := getTasksForBoard(board.BoardID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"message": "Failed to retrieve tasks for board",
+				"error":   err.Error(),
+			})
+			return
+		}
+
+		boardWithTasks := BoardWithTasks{
+			BoardID:   board.BoardID,
+			BoardName: board.BoardName,
+			CreatedAt: board.CreatedAt,
+			CreatedBy: board.CreatedBy,
+			Tasks:     tasks,
+		}
+		boards = append(boards, boardWithTasks)
+	}
+
+	// Ensure arrays are never null
 	if boards == nil {
-		boards = []struct {
-			BoardID   int       `json:"BoardID"`
-			BoardName string    `json:"BoardName"`
-			CreatedAt time.Time `json:"CreatedAt"`
-			CreatedBy uint      `json:"CreatedBy"`
-		}{}
+		boards = make([]BoardWithTasks, 0)
 	}
-
 	if boardGroup == nil {
-		boardGroup = []struct {
-			BoardID   int       `json:"BoardID"`
-			BoardName string    `json:"BoardName"`
-			CreatedAt time.Time `json:"CreatedAt"`
-			CreatedBy uint      `json:"CreatedBy"`
-		}{}
+		boardGroup = make([]BoardWithTasks, 0)
 	}
 
-	// Return the data directly without the success wrapper
+	// Return the data
 	c.JSON(http.StatusOK, gin.H{
 		"board":      boards,
 		"boardgroup": boardGroup,
