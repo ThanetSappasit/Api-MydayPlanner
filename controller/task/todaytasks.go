@@ -1,10 +1,12 @@
 package task
 
 import (
+	"context"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"net/http"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -57,7 +59,7 @@ func DataTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 	defer iter.Stop()
 
 	// Ensure tasks is a non-nil empty slice
-	tasks := make([]map[string]interface{}, 0)
+	todaytasks := make([]map[string]interface{}, 0)
 
 	for {
 		doc, err := iter.Next()
@@ -69,10 +71,10 @@ func DataTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 			return
 		}
 
-		tasks = append(tasks, doc.Data())
+		todaytasks = append(todaytasks, doc.Data())
 	}
 
-	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+	c.JSON(http.StatusOK, gin.H{"tasks": todaytasks})
 }
 
 func DataArchiveTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -195,11 +197,7 @@ func FinishTodayTaskFirebase(c *gin.Context, firestoreClient *firestore.Client) 
 		return
 	}
 
-	docRef := firestoreClient.
-		Collection("TodayTasks").
-		Doc(req.Email).
-		Collection("tasks").
-		Doc(req.TaskName)
+	docRef := firestoreClient.Collection("TodayTasks").Doc(req.Email).Collection("tasks").Doc(req.TaskName)
 
 	_, err := docRef.Update(c, []firestore.Update{
 		{Path: "archive", Value: true},
@@ -220,6 +218,12 @@ func UpdateTodayTaskFirebase(c *gin.Context, db *gorm.DB, firestoreClient *fires
 		return
 	}
 
+	// Validate required fields
+	if req.FirebaseTaskName == nil || *req.FirebaseTaskName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Firebase task name is required"})
+		return
+	}
+
 	// Query the email from the database using userId
 	var email string
 	if err := db.Raw("SELECT email FROM user WHERE user_id = ?", userId).Scan(&email).Error; err != nil {
@@ -227,4 +231,122 @@ func UpdateTodayTaskFirebase(c *gin.Context, db *gorm.DB, firestoreClient *fires
 		return
 	}
 
+	ctx := context.Background()
+
+	// Reference to the original document
+	originalDocRef := firestoreClient.Collection("TodayTasks").Doc(email).Collection("tasks").Doc(*req.FirebaseTaskName)
+
+	// Get the current document data
+	docSnapshot, err := originalDocRef.Get(ctx)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		return
+	}
+
+	// Get current data
+	currentData := docSnapshot.Data()
+
+	// Prepare update data
+	updateData := make(map[string]interface{})
+	isTaskNameChanged := false
+	newTaskName := ""
+
+	// Check and update fields
+	if req.TaskName != nil {
+		updateData["taskname"] = *req.TaskName
+		newTaskName = *req.TaskName
+		// Check if task name actually changed
+		if currentTaskName, exists := currentData["taskname"].(string); exists && currentTaskName != *req.TaskName {
+			isTaskNameChanged = true
+		}
+	}
+
+	if req.Description != nil {
+		updateData["description"] = *req.Description
+	}
+
+	if req.Status != nil {
+		updateData["status"] = *req.Status
+	}
+
+	if req.Priority != nil {
+		updateData["priority"] = *req.Priority
+	}
+
+	// If no fields to update
+	if len(updateData) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
+		return
+	}
+
+	// If task name changed, we need to create new document and delete old one
+	if isTaskNameChanged {
+		// Extract task ID from original document name (format: {id}_{taskname})
+		originalDocName := *req.FirebaseTaskName
+		parts := strings.SplitN(originalDocName, "_", 2)
+		if len(parts) != 2 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid document name format"})
+			return
+		}
+
+		taskId := parts[0] // Keep the original task ID
+
+		// Generate new document name with same ID but new task name
+		newDocName := taskId + "_" + newTaskName
+		newDocRef := firestoreClient.Collection("TodayTasks").Doc(email).Collection("tasks").Doc(newDocName)
+
+		// Start transaction to ensure data consistency
+		err = firestoreClient.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+			// Get current data again in transaction
+			currentDoc, err := tx.Get(originalDocRef)
+			if err != nil {
+				return err
+			}
+
+			// Merge current data with updates
+			newData := currentDoc.Data()
+			for key, value := range updateData {
+				newData[key] = value
+			}
+
+			// Create new document
+			if err := tx.Set(newDocRef, newData); err != nil {
+				return err
+			}
+
+			// Delete old document
+			if err := tx.Delete(originalDocRef); err != nil {
+				return err
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task with name change"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":           "Task updated successfully with name change",
+			"new_document_name": newDocName,
+		})
+
+	} else {
+		var updates []firestore.Update
+		for key, value := range updateData {
+			updates = append(updates, firestore.Update{
+				Path:  key,
+				Value: value,
+			})
+		}
+
+		_, err = originalDocRef.Update(ctx, updates)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "Task updated successfully"})
+	}
 }

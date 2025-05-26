@@ -28,8 +28,9 @@ type FinishTodayTaskRequest struct {
 }
 
 type AdjustTodayTaskRequest struct {
-	TaskName   *string `json:"task_name"`
-	Desciption *string `json:"description"`
-	Status     *string `json:"status" `
-	Priority   *string `json:"priority"`
+	FirebaseTaskName *string `json:"fbtask_name"`
+	TaskName         *string `json:"task_name"`
+	Description      *string `json:"description"`
+	Status           *string `json:"status" `
+	Priority         *string `json:"priority"`
 }
