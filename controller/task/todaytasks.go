@@ -174,11 +174,18 @@ func CreateTodayTaskFirebase(c *gin.Context, firestoreClient *firestore.Client) 
 		"archive":    false,
 	}
 
-	if req.Desciption != nil {
-		taskData["description"] = *req.Desciption
+	// ตรวจสอบและเพิ่ม description (รองรับทั้งกรณี nil และ empty string)
+	if req.Description != nil {
+		taskData["description"] = *req.Description
+	} else {
+		taskData["description"] = ""
 	}
+
+	// ตรวจสอบและเพิ่ม priority (รองรับทั้งกรณี nil และ empty string)
 	if req.Priority != nil {
 		taskData["priority"] = *req.Priority
+	} else {
+		taskData["priority"] = ""
 	}
 
 	_, err := firestoreClient.Collection("TodayTasks").Doc(req.Email).Collection("tasks").Doc(taskID).Set(c, taskData)

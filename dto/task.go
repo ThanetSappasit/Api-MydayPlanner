@@ -10,11 +10,11 @@ type CreateTaskRequest struct {
 }
 
 type CreateTodayTaskRequest struct {
-	Email      string  `json:"email" binding:"required"`
-	TaskName   string  `json:"task_name" binding:"required"`
-	Desciption *string `json:"description"`
-	Status     string  `json:"status"`
-	Priority   *string `json:"priority"`
+	Email       string  `json:"email" binding:"required"`
+	TaskName    string  `json:"task_name" binding:"required"`
+	Description *string `json:"description,omitempty"`
+	Priority    *string `json:"priority,omitempty"`
+	Status      string  `json:"status" binding:"required"`
 }
 
 type DataTodayTaskByNameRequest struct {

@@ -252,10 +252,12 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 			Joins("LEFT JOIN user ON tasks.create_by = user.user_id").
 			Where("tasks.board_id = ?", boardID).
 			Scan(&tasks).Error; err != nil {
-			return nil, err
+			return []TaskWithDetails{}, err // Return empty array instead of nil
 		}
 
-		var taskDetails []TaskWithDetails
+		// Initialize as empty array to prevent null
+		taskDetails := make([]TaskWithDetails, 0)
+
 		for _, task := range tasks {
 			taskWithDetails := TaskWithDetails{
 				TaskID:      task.TaskID,
@@ -264,17 +266,26 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 				Status:      task.Status,
 				Priority:    task.Priority,
 				CreateAt:    task.CreateAt,
-				CreateBy: []struct {
+			}
+
+			// Initialize CreateBy as empty array and add creator info if available
+			taskWithDetails.CreateBy = make([]struct {
+				UserID  int    `json:"UserID"`
+				Name    string `json:"Name"`
+				Profile string `json:"Profile"`
+			}, 0)
+
+			// Add creator info if available
+			if task.CreatorUserID != 0 {
+				taskWithDetails.CreateBy = append(taskWithDetails.CreateBy, struct {
 					UserID  int    `json:"UserID"`
 					Name    string `json:"Name"`
 					Profile string `json:"Profile"`
 				}{
-					{
-						UserID:  task.CreatorUserID,
-						Name:    task.CreatorName,
-						Profile: task.CreatorProfile,
-					},
-				},
+					UserID:  task.CreatorUserID,
+					Name:    task.CreatorName,
+					Profile: task.CreatorProfile,
+				})
 			}
 
 			// Get checklists for this task (without assigned user info)
@@ -285,47 +296,54 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 				CreateAt      time.Time `json:"create_at"`
 			}
 
+			// Initialize checklist as empty array to prevent null
+			taskWithDetails.Checklist = make([]ChecklistWithUser, 0)
+
 			if err := db.Table("checklists").
 				Select("checklists.checklist_id, checklists.checklist_name, checklists.is_archive, checklists.create_at").
 				Where("checklists.task_id = ?", task.TaskID).
 				Scan(&checklists).Error; err != nil {
-				return nil, err
-			}
-
-			// Initialize as empty array to prevent null
-			taskWithDetails.Checklist = make([]ChecklistWithUser, 0)
-
-			// Convert checklists to ChecklistWithUser format (without AssignedTo)
-			for _, checklist := range checklists {
-				checklistWithUser := ChecklistWithUser{
-					ChecklistID:   checklist.ChecklistID,
-					ChecklistName: checklist.ChecklistName,
-					IsArchive:     checklist.IsArchive,
-					CreateAt:      checklist.CreateAt,
+				// Even if error, keep empty array
+				taskWithDetails.Checklist = make([]ChecklistWithUser, 0)
+			} else {
+				// Convert checklists to ChecklistWithUser format (without AssignedTo)
+				for _, checklist := range checklists {
+					checklistWithUser := ChecklistWithUser{
+						ChecklistID:   checklist.ChecklistID,
+						ChecklistName: checklist.ChecklistName,
+						IsArchive:     checklist.IsArchive,
+						CreateAt:      checklist.CreateAt,
+					}
+					taskWithDetails.Checklist = append(taskWithDetails.Checklist, checklistWithUser)
 				}
-				taskWithDetails.Checklist = append(taskWithDetails.Checklist, checklistWithUser)
 			}
 
 			// Get attachments for this task
 			var attachments []AttachmentData
+
+			// Initialize attachments as empty array to prevent null
+			taskWithDetails.Attachments = make([]AttachmentData, 0)
+
 			if err := db.Table("attachments").
 				Select("attachment_id, file_name, file_path, file_type, upload_at").
 				Where("tasks_id = ?", task.TaskID).
 				Scan(&attachments).Error; err != nil {
-				return nil, err
-			}
-
-			// Initialize as empty array to prevent null
-			taskWithDetails.Attachments = make([]AttachmentData, 0)
-			if len(attachments) > 0 {
+				// Even if error, keep empty array
+				taskWithDetails.Attachments = make([]AttachmentData, 0)
+			} else if len(attachments) > 0 {
 				taskWithDetails.Attachments = attachments
 			}
+			// If no attachments found, it will remain as empty array
 
 			taskDetails = append(taskDetails, taskWithDetails)
 		}
 
 		return taskDetails, nil
 	}
+
+	// Initialize arrays as empty to prevent null
+	boardGroup := make([]BoardWithTasks, 0)
+	boards := make([]BoardWithTasks, 0)
 
 	// Get boards where user is a member (boardgroup)
 	var boardGroupData []struct {
@@ -339,25 +357,21 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 		Joins("JOIN board ON board_user.board_id = board.board_id").
 		Where("board_user.user_id = ?", userId).
 		Scan(&boardGroupData).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Failed to retrieve board groups",
-			"error":   err.Error(),
-		})
-		return
+		// Don't return error, just keep empty array
+		boardGroupData = make([]struct {
+			BoardID   int       `json:"BoardID"`
+			BoardName string    `json:"BoardName"`
+			CreatedAt time.Time `json:"CreatedAt"`
+			CreatedBy uint      `json:"CreatedBy"`
+		}, 0)
 	}
 
 	// Process boardgroup
-	var boardGroup []BoardWithTasks
 	for _, board := range boardGroupData {
 		tasks, err := getTasksForBoard(board.BoardID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"success": false,
-				"message": "Failed to retrieve tasks for board group",
-				"error":   err.Error(),
-			})
-			return
+			// If error getting tasks, use empty array
+			tasks = make([]TaskWithDetails, 0)
 		}
 
 		boardWithTasks := BoardWithTasks{
@@ -371,7 +385,7 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 	}
 
 	// Extract board IDs from boardGroup to exclude them
-	var boardGroupIds []int
+	boardGroupIds := make([]int, 0)
 	for _, board := range boardGroup {
 		boardGroupIds = append(boardGroupIds, board.BoardID)
 	}
@@ -393,25 +407,21 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 	}
 
 	if err := query.Scan(&boardsData).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Failed to retrieve boards",
-			"error":   err.Error(),
-		})
-		return
+		// Don't return error, just keep empty array
+		boardsData = make([]struct {
+			BoardID   int       `json:"BoardID"`
+			BoardName string    `json:"BoardName"`
+			CreatedAt time.Time `json:"CreatedAt"`
+			CreatedBy uint      `json:"CreatedBy"`
+		}, 0)
 	}
 
 	// Process boards
-	var boards []BoardWithTasks
 	for _, board := range boardsData {
 		tasks, err := getTasksForBoard(board.BoardID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"success": false,
-				"message": "Failed to retrieve tasks for board",
-				"error":   err.Error(),
-			})
-			return
+			// If error getting tasks, use empty array
+			tasks = make([]TaskWithDetails, 0)
 		}
 
 		boardWithTasks := BoardWithTasks{
@@ -424,31 +434,30 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 		boards = append(boards, boardWithTasks)
 	}
 
-	// Ensure arrays are never null
-	if boards == nil {
-		boards = make([]BoardWithTasks, 0)
-	}
-	if boardGroup == nil {
-		boardGroup = make([]BoardWithTasks, 0)
-	}
-
-	iter := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Where("archive", "==", false).Documents(c)
-	defer iter.Stop()
+	// Get today tasks from Firestore
 	todaytasks := make([]map[string]interface{}, 0)
-	for {
-		doc, err := iter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tasks"})
-			return
-		}
 
-		todaytasks = append(todaytasks, doc.Data())
+	if firestoreClient != nil && user.Email != "" {
+		iter := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Where("archive", "==", false).Documents(c)
+		if iter != nil {
+			defer iter.Stop()
+			for {
+				doc, err := iter.Next()
+				if err == iterator.Done {
+					break
+				}
+				if err != nil {
+					// If error, just keep empty array and continue
+					break
+				}
+				if doc != nil && doc.Data() != nil {
+					todaytasks = append(todaytasks, doc.Data())
+				}
+			}
+		}
 	}
 
-	// Return the data
+	// Return the data - all arrays are guaranteed to be empty arrays, never null
 	c.JSON(http.StatusOK, gin.H{
 		"board":      boards,
 		"boardgroup": boardGroup,
