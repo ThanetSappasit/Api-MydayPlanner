@@ -205,7 +205,27 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 		UploadAt     time.Time `json:"UploadAt"`
 	}
 
-	// Define Task struct with Creator info, Checklist and Attachments
+	// Define BoardToken struct
+	type BoardTokenData struct {
+		TokenID   int       `json:"TokenID"`
+		Token     string    `json:"Token"`
+		ExpiresAt time.Time `json:"ExpiresAt"`
+		CreateAt  time.Time `json:"CreateAt"`
+	}
+
+	// Define Assigned struct
+	type AssignedData struct {
+		AssID    int       `json:"AssID"`
+		UserID   int       `json:"UserID"`
+		AssignAt time.Time `json:"AssignAt"`
+		User     struct {
+			UserID  int    `json:"UserID"`
+			Name    string `json:"Name"`
+			Profile string `json:"Profile"`
+		} `json:"User"`
+	}
+
+	// Define Task struct with Creator info, Checklist, Attachments and Assigned
 	type TaskWithDetails struct {
 		TaskID      int       `json:"TaskID"`
 		TaskName    string    `json:"TaskName"`
@@ -220,19 +240,21 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 		} `json:"CreateBy"`
 		Checklist   []ChecklistWithUser `json:"checklist"`
 		Attachments []AttachmentData    `json:"attachments"`
+		Assigned    []AssignedData      `json:"assigned"`
 	}
 
-	// Define Board struct with Tasks
+	// Define Board struct with Tasks and BoardTokens
 	type BoardWithTasks struct {
-		BoardID   int               `json:"BoardID"`
-		BoardName string            `json:"BoardName"`
-		CreatedAt time.Time         `json:"CreatedAt"`
-		CreatedBy uint              `json:"CreatedBy"`
-		Tasks     []TaskWithDetails `json:"tasks"`
+		BoardID     int               `json:"BoardID"`
+		BoardName   string            `json:"BoardName"`
+		CreatedAt   time.Time         `json:"CreatedAt"`
+		CreatedBy   uint              `json:"CreatedBy"`
+		Tasks       []TaskWithDetails `json:"tasks"`
+		BoardTokens []BoardTokenData  `json:"boardtokens"`
 	}
 
 	// Helper function to get tasks with details for a board
-	getTasksForBoard := func(boardID int) ([]TaskWithDetails, error) {
+	getTasksForBoard := func(boardID int, includingAssigned bool) ([]TaskWithDetails, error) {
 		// Get tasks for this board
 		var tasks []struct {
 			TaskID         int       `json:"task_id"`
@@ -335,10 +357,70 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 			}
 			// If no attachments found, it will remain as empty array
 
+			// Get assigned users for this task (only if includingAssigned is true)
+			taskWithDetails.Assigned = make([]AssignedData, 0) // Always initialize as empty array
+
+			if includingAssigned {
+				var assignedUsers []struct {
+					AssID    int       `json:"ass_id"`
+					UserID   int       `json:"user_id"`
+					AssignAt time.Time `json:"assign_at"`
+					UserName string    `json:"user_name"`
+					Profile  string    `json:"profile"`
+				}
+
+				if err := db.Table("assigned").
+					Select("assigned.ass_id, assigned.user_id, assigned.assign_at, user.name as user_name, user.profile").
+					Joins("LEFT JOIN user ON assigned.user_id = user.user_id").
+					Where("assigned.task_id = ?", task.TaskID).
+					Scan(&assignedUsers).Error; err != nil {
+					// Even if error, keep empty array
+					taskWithDetails.Assigned = make([]AssignedData, 0)
+				} else {
+					// Convert to AssignedData format
+					for _, assigned := range assignedUsers {
+						assignedData := AssignedData{
+							AssID:    assigned.AssID,
+							UserID:   assigned.UserID,
+							AssignAt: assigned.AssignAt,
+							User: struct {
+								UserID  int    `json:"UserID"`
+								Name    string `json:"Name"`
+								Profile string `json:"Profile"`
+							}{
+								UserID:  assigned.UserID,
+								Name:    assigned.UserName,
+								Profile: assigned.Profile,
+							},
+						}
+						taskWithDetails.Assigned = append(taskWithDetails.Assigned, assignedData)
+					}
+				}
+			}
+
 			taskDetails = append(taskDetails, taskWithDetails)
 		}
 
 		return taskDetails, nil
+	}
+
+	// Helper function to get board tokens for a board
+	getBoardTokensForBoard := func(boardID int) ([]BoardTokenData, error) {
+		var boardTokens []BoardTokenData
+
+		if err := db.Table("board_token").
+			Select("token_id, token, expires_at, create_at").
+			Where("board_id = ?", boardID).
+			Scan(&boardTokens).Error; err != nil {
+			return make([]BoardTokenData, 0), err // Return empty array instead of nil
+		}
+
+		// Initialize as empty array to prevent null
+		if boardTokens == nil {
+			boardTokens = make([]BoardTokenData, 0)
+		}
+
+		return boardTokens, nil
 	}
 
 	// Initialize arrays as empty to prevent null
@@ -368,18 +450,26 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 
 	// Process boardgroup
 	for _, board := range boardGroupData {
-		tasks, err := getTasksForBoard(board.BoardID)
+		tasks, err := getTasksForBoard(board.BoardID, true) // Include assigned for board groups
 		if err != nil {
 			// If error getting tasks, use empty array
 			tasks = make([]TaskWithDetails, 0)
 		}
 
+		// Get board tokens for this board
+		boardTokens, err := getBoardTokensForBoard(board.BoardID)
+		if err != nil {
+			// If error getting board tokens, use empty array
+			boardTokens = make([]BoardTokenData, 0)
+		}
+
 		boardWithTasks := BoardWithTasks{
-			BoardID:   board.BoardID,
-			BoardName: board.BoardName,
-			CreatedAt: board.CreatedAt,
-			CreatedBy: board.CreatedBy,
-			Tasks:     tasks,
+			BoardID:     board.BoardID,
+			BoardName:   board.BoardName,
+			CreatedAt:   board.CreatedAt,
+			CreatedBy:   board.CreatedBy,
+			Tasks:       tasks,
+			BoardTokens: boardTokens,
 		}
 		boardGroup = append(boardGroup, boardWithTasks)
 	}
@@ -418,18 +508,21 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 
 	// Process boards
 	for _, board := range boardsData {
-		tasks, err := getTasksForBoard(board.BoardID)
+		tasks, err := getTasksForBoard(board.BoardID, false) // Don't include assigned for regular boards
 		if err != nil {
 			// If error getting tasks, use empty array
 			tasks = make([]TaskWithDetails, 0)
 		}
 
+		// Note: Regular boards (not board groups) don't need board tokens
+		// Only board groups need board tokens as per requirement
 		boardWithTasks := BoardWithTasks{
-			BoardID:   board.BoardID,
-			BoardName: board.BoardName,
-			CreatedAt: board.CreatedAt,
-			CreatedBy: board.CreatedBy,
-			Tasks:     tasks,
+			BoardID:     board.BoardID,
+			BoardName:   board.BoardName,
+			CreatedAt:   board.CreatedAt,
+			CreatedBy:   board.CreatedBy,
+			Tasks:       tasks,
+			BoardTokens: make([]BoardTokenData, 0), // Empty array for regular boards
 		}
 		boards = append(boards, boardWithTasks)
 	}
