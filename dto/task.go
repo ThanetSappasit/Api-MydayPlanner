@@ -10,16 +10,13 @@ type CreateTaskRequest struct {
 }
 
 type CreateTodayTaskRequest struct {
-	Email      string `json:"email" binding:"required"`
-	TaskName   string `json:"task_name" binding:"required"`
-	Desciption string `json:"description"`
-	Status     string `json:"status" binding:"required"`
-	Priority   string `json:"priority"`
+	Email      string  `json:"email" binding:"required"`
+	TaskName   string  `json:"task_name" binding:"required"`
+	Desciption *string `json:"description"`
+	Status     string  `json:"status"`
+	Priority   *string `json:"priority"`
 }
 
-type DataTodayTaskRequest struct {
-	Email string `json:"email" binding:"required"`
-}
 type DataTodayTaskByNameRequest struct {
 	Email    string `json:"email" binding:"required"`
 	TaskName string `json:"task_name" binding:"required"`
@@ -28,4 +25,11 @@ type DataTodayTaskByNameRequest struct {
 type FinishTodayTaskRequest struct {
 	Email    string `json:"email" binding:"required"`
 	TaskName string `json:"task_name" binding:"required"`
+}
+
+type AdjustTodayTaskRequest struct {
+	TaskName   *string `json:"task_name"`
+	Desciption *string `json:"description"`
+	Status     *string `json:"status" `
+	Priority   *string `json:"priority"`
 }

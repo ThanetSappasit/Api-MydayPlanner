@@ -17,10 +17,10 @@ func TodayTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *fires
 	routes := router.Group("/todaytasks", middleware.AccessTokenMiddleware())
 	{
 		routes.POST("/alltoday", func(c *gin.Context) {
-			DataTodayTask(c, firestoreClient)
+			DataTodayTask(c, db, firestoreClient)
 		})
 		routes.POST("/allarchivetoday", func(c *gin.Context) {
-			DataArchiveTodayTask(c, firestoreClient)
+			DataArchiveTodayTask(c, db, firestoreClient)
 		})
 		routes.POST("/data", func(c *gin.Context) {
 			DataTodayTaskByName(c, firestoreClient)
@@ -31,21 +31,34 @@ func TodayTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *fires
 		routes.PUT("/finish", func(c *gin.Context) {
 			FinishTodayTaskFirebase(c, firestoreClient)
 		})
+		routes.PUT("/adjusttask", func(c *gin.Context) {
+			UpdateTodayTaskFirebase(c, db, firestoreClient)
+		})
 	}
 }
 
-func DataTodayTask(c *gin.Context, firestoreClient *firestore.Client) {
-	var req dto.DataTodayTaskRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+func DataTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+
+	// Query the email from the database using userId
+	var email string
+	if err := db.Raw("SELECT email FROM user WHERE user_id = ?", userId).Scan(&email).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
 		return
 	}
 
-	iter := firestoreClient.Collection("TodayTasks").Doc(req.Email).Collection("tasks").Where("archive", "==", false).Documents(c)
+	iter := firestoreClient.
+		Collection("TodayTasks").
+		Doc(email).
+		Collection("tasks").
+		Where("archive", "==", false).
+		Documents(c)
 
 	defer iter.Stop()
-	var tasks []map[string]interface{}
-	// ดึงข้อมูลจาก Firestore
+
+	// Ensure tasks is a non-nil empty slice
+	tasks := make([]map[string]interface{}, 0)
+
 	for {
 		doc, err := iter.Next()
 		if err == iterator.Done {
@@ -59,20 +72,31 @@ func DataTodayTask(c *gin.Context, firestoreClient *firestore.Client) {
 		tasks = append(tasks, doc.Data())
 	}
 
-	c.JSON(http.StatusOK, tasks)
+	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
 }
-func DataArchiveTodayTask(c *gin.Context, firestoreClient *firestore.Client) {
-	var req dto.DataTodayTaskRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+
+func DataArchiveTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+
+	// Query the email from the database using userId
+	var email string
+	if err := db.Raw("SELECT email FROM user WHERE user_id = ?", userId).Scan(&email).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
 		return
 	}
 
-	iter := firestoreClient.Collection("TodayTasks").Doc(req.Email).Collection("tasks").Where("archive", "==", true).Documents(c)
+	iter := firestoreClient.
+		Collection("TodayTasks").
+		Doc(email).
+		Collection("tasks").
+		Where("archive", "==", true).
+		Documents(c)
 
 	defer iter.Stop()
-	var tasks []map[string]interface{}
-	// ดึงข้อมูลจาก Firestore
+
+	// Ensure tasks is a non-nil empty slice
+	tasks := make([]map[string]interface{}, 0)
+
 	for {
 		doc, err := iter.Next()
 		if err == iterator.Done {
@@ -86,7 +110,7 @@ func DataArchiveTodayTask(c *gin.Context, firestoreClient *firestore.Client) {
 		tasks = append(tasks, doc.Data())
 	}
 
-	c.JSON(http.StatusOK, tasks)
+	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
 }
 
 func DataTodayTaskByName(c *gin.Context, firestoreClient *firestore.Client) {
@@ -142,12 +166,17 @@ func CreateTodayTaskFirebase(c *gin.Context, firestoreClient *firestore.Client) 
 	taskID := fmt.Sprintf("%d_%s", count+1, req.TaskName)
 
 	taskData := map[string]interface{}{
-		"taskname":    req.TaskName,
-		"description": req.Desciption,
-		"status":      req.Status,
-		"priority":    req.Priority,
-		"created_at":  time.Now(),
-		"archive":     false,
+		"taskname":   req.TaskName,
+		"status":     req.Status,
+		"created_at": time.Now(),
+		"archive":    false,
+	}
+
+	if req.Desciption != nil {
+		taskData["description"] = *req.Desciption
+	}
+	if req.Priority != nil {
+		taskData["priority"] = *req.Priority
 	}
 
 	_, err := firestoreClient.Collection("TodayTasks").Doc(req.Email).Collection("tasks").Doc(taskID).Set(c, taskData)
@@ -181,4 +210,21 @@ func FinishTodayTaskFirebase(c *gin.Context, firestoreClient *firestore.Client) 
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Task archived successfully"})
+}
+
+func UpdateTodayTaskFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+	var req dto.AdjustTodayTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	// Query the email from the database using userId
+	var email string
+	if err := db.Raw("SELECT email FROM user WHERE user_id = ?", userId).Scan(&email).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
+		return
+	}
+
 }
