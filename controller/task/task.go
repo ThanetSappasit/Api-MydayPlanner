@@ -77,6 +77,7 @@ func CreateTaskFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		"Status":      newTask.Status,
 		"Priority":    newTask.Priority,
 		"Description": newTask.Description,
+		"Archived":    false,
 	}
 
 	// Determine the collection path based on whether it's a group or private board

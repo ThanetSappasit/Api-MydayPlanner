@@ -10,7 +10,6 @@ type CreateTaskRequest struct {
 }
 
 type CreateTodayTaskRequest struct {
-	Email       string  `json:"email" binding:"required"`
 	TaskName    string  `json:"task_name" binding:"required"`
 	Description *string `json:"description,omitempty"`
 	Priority    *string `json:"priority,omitempty"`

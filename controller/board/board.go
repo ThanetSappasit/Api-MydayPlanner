@@ -105,89 +105,84 @@ func CreateBoardsFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestor
 		groupType = "Group"
 	}
 
-	// 2. สร้าง transaction แยกสำหรับ PostgreSQL
-	errChan := make(chan error, 2) // ช่องสำหรับรับ error จากทั้ง goroutine
+	// 2. สร้าง board ใน PostgreSQL ก่อน
+	tx := db.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database transaction error"})
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
 
-	// 3. ดำเนินการ transaction ใน PostgreSQL ผ่าน goroutine
-	go func() {
-		tx := db.Begin()
-		if tx.Error != nil {
-			errChan <- tx.Error
+	if err := tx.Create(&newBoard).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create board: " + err.Error()})
+		return
+	}
+
+	if board.Is_group == "1" {
+		boardUser := model.BoardUser{
+			BoardID: newBoard.BoardID,
+			UserID:  user.UserID,
+			AddedAt: time.Now(),
+		}
+
+		if err := tx.Create(&boardUser).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create board user: " + err.Error()})
 			return
 		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction: " + err.Error()})
+		return
+	}
+
+	// 3. หลังจาก commit แล้ว ตอนนี้ newBoard.BoardID จะมีค่าแล้ว
+	// ส่งข้อมูลไป Firebase ผ่าน goroutine
+	errChan := make(chan error, 1)
+
+	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				tx.Rollback()
 				if err, ok := r.(error); ok {
 					errChan <- err
 				} else {
-					errChan <- fmt.Errorf("panic in PostgreSQL transaction: %v", r)
+					errChan <- fmt.Errorf("panic in Firebase operation: %v", r)
 				}
 			}
 		}()
 
-		if err := tx.Create(&newBoard).Error; err != nil {
-			tx.Rollback()
-			errChan <- err
-			return
+		boardDataFirebase := gin.H{
+			"BoardID":   newBoard.BoardID,
+			"BoardName": newBoard.BoardName,
+			"CreatedBy": newBoard.CreatedBy,
+			"CreatedAt": user.Name,
 		}
 
-		if board.Is_group == "1" {
-			boardUser := model.BoardUser{
-				BoardID: newBoard.BoardID,
-				UserID:  user.UserID,
-				AddedAt: time.Now(),
-			}
-
-			if err := tx.Create(&boardUser).Error; err != nil {
-				tx.Rollback()
-				errChan <- err
-				return
-			}
-		}
-
-		if err := tx.Commit().Error; err != nil {
-			tx.Rollback()
-			errChan <- err
-			return
-		}
-		errChan <- nil // แจ้งว่าทำงานสำเร็จ
-	}()
-
-	// 4. ขณะเดียวกัน เตรียมข้อมูลสำหรับ Firebase แล้วเขียนลง Firestore
-	boardDataFirebase := gin.H{
-		"BoardID":   newBoard.BoardID,
-		"BoardName": newBoard.BoardName,
-		"CreatedBy": newBoard.CreatedBy,
-		"CreatedAt": user.Name,
-	}
-
-	go func() {
 		mainDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(board.CreatedBy))
 		subCollection := mainDoc.Collection(fmt.Sprintf("%s_Boards", groupType))
 		_, err := subCollection.Doc(strconv.Itoa(newBoard.BoardID)).Set(ctx, boardDataFirebase)
-		errChan <- err // แจ้งผลลัพธ์ (nil หรือ error)
+		errChan <- err
 	}()
 
-	// รอผลลัพธ์จากทั้งสอง goroutine
-	var postgresErr, firestoreErr error
-	for i := 0; i < 2; i++ {
-		if err := <-errChan; err != nil {
-			if i == 0 {
-				postgresErr = err
-			} else {
-				firestoreErr = err
-			}
-		}
-	}
+	// รอผลลัพธ์จาก Firebase
+	firestoreErr := <-errChan
 
-	// ตรวจสอบ error และส่งผลลัพธ์
-	if postgresErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error: " + postgresErr.Error()})
-		return
-	}
+	// ตรวจสอบ error จาก Firestore
 	if firestoreErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Firestore error: " + firestoreErr.Error()})
+		// Log error แต่ไม่ fail ทั้งหมด เนื่องจาก PostgreSQL สำเร็จแล้ว
+		fmt.Printf("Firestore error (board created in DB): %v\n", firestoreErr)
+		c.JSON(http.StatusCreated, gin.H{
+			"message": "Board created successfully (with Firestore sync issue)",
+			"boardID": newBoard.BoardID,
+			"warning": "Firestore sync failed but board was created",
+		})
 		return
 	}
 
