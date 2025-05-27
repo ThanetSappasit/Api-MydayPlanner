@@ -3,8 +3,11 @@ package connection
 import (
 	"log"
 	"mydayplanner/controller/admin"
+	"mydayplanner/controller/assigned"
+	"mydayplanner/controller/attachments"
 	"mydayplanner/controller/auth"
 	"mydayplanner/controller/board"
+	"mydayplanner/controller/checklist"
 	"mydayplanner/controller/report"
 	"mydayplanner/controller/task"
 	"mydayplanner/controller/user"
@@ -40,6 +43,9 @@ func StartServer() {
 	report.ReportController(router, DB, FB)
 	task.TaskController(router, DB, FB)
 	task.TodayTaskController(router, DB, FB)
+	checklist.TodayChecklistController(router, DB, FB)
+	attachments.TodayAttachmentsController(router, DB, FB)
+	assigned.TodayAssignedController(router, DB, FB)
 
 	router.Run()
 }
