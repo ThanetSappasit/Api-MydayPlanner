@@ -567,7 +567,7 @@ func GetAllDataFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 	userId := c.MustGet("userId").(uint)
 
 	var user model.User
-	if err := db.Raw("SELECT user_id, email, name, profile, create_at FROM user WHERE user_id = ?", userId).Scan(&user).Error; err != nil {
+	if err := db.Raw("SELECT user_id, email, name, role, profile, create_at FROM user WHERE user_id = ?", userId).Scan(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
 		return
 	}
@@ -577,6 +577,7 @@ func GetAllDataFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		"Email":     user.Email,
 		"Name":      user.Name,
 		"Profile":   user.Profile,
+		"Role":      user.Role,
 		"CreatedAt": user.CreatedAt,
 	}
 
