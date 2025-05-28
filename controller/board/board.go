@@ -72,6 +72,7 @@ func GetBoards(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 }
 
 func CreateBoardsFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
 	var board dto.CreateBoardRequest
 	if err := c.ShouldBindJSON(&board); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
@@ -86,8 +87,9 @@ func CreateBoardsFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestor
 	var user struct {
 		UserID int
 		Name   string
+		Email  string
 	}
-	if err := db.Table("user").Select("user_id, name").Where("user_id = ?", board.CreatedBy).First(&user).Error; err != nil {
+	if err := db.Table("user").Select("user_id, name, email").Where("user_id = ?", userId).First(&user).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
@@ -162,10 +164,10 @@ func CreateBoardsFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestor
 			"BoardID":   newBoard.BoardID,
 			"BoardName": newBoard.BoardName,
 			"CreatedBy": newBoard.CreatedBy,
-			"CreatedAt": user.Name,
+			"CreatedAt": newBoard.CreatedAt,
 		}
 
-		mainDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(board.CreatedBy))
+		mainDoc := firestoreClient.Collection("Boards").Doc(user.Email)
 		subCollection := mainDoc.Collection(fmt.Sprintf("%s_Boards", groupType))
 		_, err := subCollection.Doc(strconv.Itoa(newBoard.BoardID)).Set(ctx, boardDataFirebase)
 		errChan <- err

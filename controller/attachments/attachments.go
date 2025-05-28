@@ -1,0 +1,107 @@
+package attachments
+
+import (
+	"context"
+	"fmt"
+	"mydayplanner/dto"
+	"mydayplanner/middleware"
+	"mydayplanner/model"
+	"net/http"
+	"strconv"
+	"time"
+
+	"cloud.google.com/go/firestore"
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+)
+
+func AttachmentsController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
+	routes := router.Group("/attachment", middleware.AccessTokenMiddleware())
+	{
+		routes.POST("/create", func(c *gin.Context) {
+			Attachment(c, db, firestoreClient)
+		})
+	}
+}
+
+func Attachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+	var req dto.CreateAttachmentsTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	// Get user email for Firebase path
+	var user model.User
+	if err := db.Raw("SELECT user_id, email FROM user WHERE user_id = ?", userId).Scan(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
+		return
+	}
+
+	// Convert string IDs to integers
+	taskID, err := strconv.Atoi(req.TaskID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+
+	// Create attachment record
+	attachment := model.Attachment{
+		TasksID:  taskID,
+		FileName: req.Filename,
+		FilePath: req.Filepath,
+		FileType: req.Filetype,
+		UploadAt: time.Now(),
+	}
+
+	// Save to SQL database
+	if err := db.Create(&attachment).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attachment"})
+		return
+	}
+
+	// Get the generated AttachmentID
+	attachmentID := attachment.AttachmentID
+
+	// Prepare Firebase document data
+	firestoreData := map[string]interface{}{
+		"AttachmentID": attachmentID,
+		"TaskID":       taskID,
+		"Filename":     attachment.FileName,
+		"Filepath":     attachment.FilePath,
+		"Filetype":     attachment.FileType,
+		"UploadAt":     attachment.UploadAt,
+	}
+
+	// Determine board type for path
+	var boardType string
+	if req.Isgroup == "1" {
+		boardType = "Group_Boards"
+	} else {
+		boardType = "Private_Boards"
+	}
+
+	// Create Firebase collection path (not document path)
+	collectionPath := fmt.Sprintf("Boards/%s/%s/%s/tasks/%s/Attachments",
+		user.Email, boardType, req.BoardID, req.TaskID)
+
+	// Save to Firebase using Set() with specific document ID
+	ctx := context.Background()
+	docRef := firestoreClient.Collection(collectionPath).Doc(strconv.Itoa(attachmentID))
+	_, err = docRef.Set(ctx, firestoreData)
+	if err != nil {
+		// Log the error but don't fail the request since SQL save was successful
+		c.JSON(http.StatusPartialContent, gin.H{
+			"message":       "Attachment created in database but failed to sync with Firebase",
+			"attachment_id": attachmentID,
+			"error":         err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Attachment created successfully",
+		"attachment_id": attachmentID,
+	})
+}

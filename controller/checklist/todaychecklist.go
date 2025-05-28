@@ -26,7 +26,7 @@ func TodayChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *
 
 func CreateTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
-	var req dto.CreateChecklistTaskRequest
+	var req dto.CreateChecklistTodayTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 		return

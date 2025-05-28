@@ -44,8 +44,10 @@ func StartServer() {
 	task.TaskController(router, DB, FB)
 	task.TodayTaskController(router, DB, FB)
 	checklist.TodayChecklistController(router, DB, FB)
+	checklist.ChecklistController(router, DB, FB)
+	attachments.AttachmentsController(router, DB, FB)
 	attachments.TodayAttachmentsController(router, DB, FB)
-	assigned.TodayAssignedController(router, DB, FB)
+	assigned.AssignedController(router, DB, FB)
 
 	router.Run()
 }

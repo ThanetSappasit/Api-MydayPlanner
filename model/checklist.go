@@ -9,7 +9,6 @@ type Checklist struct {
 	ChecklistID   int       `gorm:"column:checklist_id;primaryKey;autoIncrement"`
 	TaskID        int       `gorm:"column:task_id;not null"`
 	ChecklistName string    `gorm:"column:checklist_name;type:varchar(255);not null"`
-	IsArchive     bool      `gorm:"column:is_archive;default:0"`
 	CreateAt      time.Time `gorm:"column:create_at;autoCreateTime"`
 
 	// Relations

@@ -26,7 +26,7 @@ func TodayAttachmentsController(router *gin.Engine, db *gorm.DB, firestoreClient
 
 func CreateTodayAttachmentsFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
-	var req dto.CreateAttachmentsTaskRequest
+	var req dto.CreateAttachmentsTodayTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 		return

@@ -1,6 +1,7 @@
 package user
 
 import (
+	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
@@ -17,6 +18,9 @@ import (
 func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
 	routes := router.Group("/user", middleware.AccessTokenMiddleware())
 	{
+		routes.GET("/alldata", func(c *gin.Context) {
+			GetAllDataFirebase(c, db, firestoreClient)
+		})
 		routes.GET("/ReadAllUser", func(c *gin.Context) {
 			ReadAllUser(c, db)
 		})
@@ -556,5 +560,130 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 		"boardgroup": boardGroup,
 		"user":       user,
 		"todaytasks": todaytasks,
+	})
+}
+
+func GetAllDataFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+
+	var user model.User
+	if err := db.Raw("SELECT user_id, email, name, profile, create_at FROM user WHERE user_id = ?", userId).Scan(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
+		return
+	}
+
+	userData := map[string]interface{}{
+		"UserID":    user.UserID,
+		"Email":     user.Email,
+		"Name":      user.Name,
+		"Profile":   user.Profile,
+		"CreatedAt": user.CreatedAt,
+	}
+
+	// ===== Helper สำหรับ subcollections =====
+	getSubcollection := func(collectionPath string) []map[string]interface{} {
+		items := []map[string]interface{}{}
+		docs, err := firestoreClient.Collection(collectionPath).Documents(c).GetAll()
+		if err != nil {
+			// Log error but continue processing
+			return items
+		}
+		for _, d := range docs {
+			items = append(items, d.Data())
+		}
+		return items
+	}
+
+	// ===== Tasks =====
+	taskDocs, err := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Documents(c).GetAll()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get tasks from Firestore"})
+		return
+	}
+
+	tasks := []map[string]interface{}{}
+	for _, doc := range taskDocs {
+		taskData := doc.Data()
+
+		taskID := doc.Ref.ID
+		taskData["Attachments"] = getSubcollection(fmt.Sprintf("TodayTasks/%s/tasks/%s/Attachments", user.Email, taskID))
+		taskData["Checklists"] = getSubcollection(fmt.Sprintf("TodayTasks/%s/tasks/%s/Checklists", user.Email, taskID))
+
+		tasks = append(tasks, taskData)
+	}
+
+	// ===== Group Boards =====
+	groupBoardDocs, err := firestoreClient.Collection("Boards").Doc(user.Email).Collection("Group_Boards").Documents(c).GetAll()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get Group Boards from Firestore"})
+		return
+	}
+
+	groupBoards := []map[string]interface{}{}
+	for _, boardDoc := range groupBoardDocs {
+		boardData := boardDoc.Data()
+		boardID := boardDoc.Ref.ID
+
+		// Get tasks for this board
+		taskCollectionPath := fmt.Sprintf("Boards/%s/Group_Boards/%s/tasks", user.Email, boardID)
+		taskDocs, err := firestoreClient.Collection(taskCollectionPath).Documents(c).GetAll()
+		if err == nil {
+			boardTasks := []map[string]interface{}{}
+			for _, taskDoc := range taskDocs {
+				taskData := taskDoc.Data()
+				taskID := taskDoc.Ref.ID
+
+				// Add subcollections to each task with correct paths and field names
+				taskData["Assigned"] = getSubcollection(fmt.Sprintf("Boards/%s/Group_Boards/%s/tasks/%s/Assigned", user.Email, boardID, taskID))
+				taskData["Attachments"] = getSubcollection(fmt.Sprintf("Boards/%s/Group_Boards/%s/tasks/%s/Attachments", user.Email, boardID, taskID))
+				taskData["Checklists"] = getSubcollection(fmt.Sprintf("Boards/%s/Group_Boards/%s/tasks/%s/Checklists", user.Email, boardID, taskID))
+
+				boardTasks = append(boardTasks, taskData)
+			}
+			boardData["tasks"] = boardTasks
+		}
+
+		groupBoards = append(groupBoards, boardData)
+	}
+
+	// ===== Private Boards =====
+	privateBoardDocs, err := firestoreClient.Collection("Boards").Doc(user.Email).Collection("Private_Boards").Documents(c).GetAll()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get Private Boards from Firestore"})
+		return
+	}
+
+	privateBoards := []map[string]interface{}{}
+	for _, boardDoc := range privateBoardDocs {
+		boardData := boardDoc.Data()
+		boardID := boardDoc.Ref.ID
+
+		// Get tasks for this board
+		taskCollectionPath := fmt.Sprintf("Boards/%s/Private_Boards/%s/tasks", user.Email, boardID)
+		taskDocs, err := firestoreClient.Collection(taskCollectionPath).Documents(c).GetAll()
+		if err == nil {
+			boardTasks := []map[string]interface{}{}
+			for _, taskDoc := range taskDocs {
+				taskData := taskDoc.Data()
+				taskID := taskDoc.Ref.ID
+
+				// Add subcollections to each task with correct paths and field names
+				taskData["Attachments"] = getSubcollection(fmt.Sprintf("Boards/%s/Private_Boards/%s/tasks/%s/Attachments", user.Email, boardID, taskID))
+				taskData["Checklists"] = getSubcollection(fmt.Sprintf("Boards/%s/Private_Boards/%s/tasks/%s/Checklists", user.Email, boardID, taskID))
+
+				boardTasks = append(boardTasks, taskData)
+			}
+			boardData["tasks"] = boardTasks
+		}
+
+		privateBoards = append(privateBoards, boardData)
+	}
+
+	// ===== Response =====
+	c.JSON(http.StatusOK, gin.H{
+		"user":       userData,
+		"todaytasks": tasks,
+		"boardgroup": groupBoards,
+		"board":      privateBoards,
 	})
 }

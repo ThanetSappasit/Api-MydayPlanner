@@ -89,7 +89,7 @@ func CreateTaskFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 	}
 
 	// Set data according to the Firestore structure
-	userIDStr := strconv.Itoa(user.UserID)
+	userIDStr := user.Email
 	boardIDStr := strconv.Itoa(task.BoardID)
 	taskIDStr := strconv.Itoa(newTask.TaskID)
 
