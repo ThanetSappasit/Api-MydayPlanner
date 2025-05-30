@@ -17,8 +17,7 @@ type CreateTodayTaskRequest struct {
 }
 
 type DataTodayTaskByNameRequest struct {
-	Email    string `json:"email" binding:"required"`
-	TaskName string `json:"task_name" binding:"required"`
+	TaskID string `json:"task_id" binding:"required"`
 }
 
 type FinishTodayTaskRequest struct {
@@ -35,4 +34,8 @@ type AdjustTodayTaskRequest struct {
 
 type DeleteTodayTaskRequest struct {
 	TaskID []string `json:"task_id" validate:"required"`
+}
+
+type DeleteIDTodayTaskRequest struct {
+	TaskID string `json:"task_id" validate:"required"`
 }
