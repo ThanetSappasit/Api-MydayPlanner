@@ -9,3 +9,7 @@ type CreateBoardRequest struct {
 	BoardName string `json:"board_name" validate:"required"`
 	Is_group  string `json:"is_group"`
 }
+
+type DeleteBoardRequest struct {
+	BoardID []string `json:"board_id" validate:"required"`
+}

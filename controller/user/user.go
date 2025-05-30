@@ -1,11 +1,13 @@
 package user
 
 import (
+	"context"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -19,7 +21,7 @@ func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 	routes := router.Group("/user", middleware.AccessTokenMiddleware())
 	{
 		routes.GET("/alldata", func(c *gin.Context) {
-			GetAllDataFirebase(c, db, firestoreClient)
+			GetAllDataFirebaseOptimized(c, db, firestoreClient)
 		})
 		routes.GET("/ReadAllUser", func(c *gin.Context) {
 			ReadAllUser(c, db)
@@ -563,9 +565,10 @@ func GetUserAllData(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 	})
 }
 
-func GetAllDataFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+func GetAllDataFirebaseOptimized(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
 
+	// === ดึงข้อมูล User ===
 	var user model.User
 	if err := db.Raw("SELECT user_id, email, name, role, profile, create_at FROM user WHERE user_id = ?", userId).Scan(&user).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
@@ -581,110 +584,322 @@ func GetAllDataFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		"CreatedAt": user.CreatedAt,
 	}
 
-	// ===== Helper สำหรับ subcollections =====
-	getSubcollection := func(collectionPath string) []map[string]interface{} {
-		items := []map[string]interface{}{}
-		docs, err := firestoreClient.Collection(collectionPath).Documents(c).GetAll()
-		if err != nil {
-			// Log error but continue processing
-			return items
+	// === Concurrent Data Fetching ===
+	var wg sync.WaitGroup
+	results := make(chan BatchResult, 3)
+	ctx := c.Request.Context()
+
+	// Goroutine 1: Tasks
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tasks, err := fetchTasks(ctx, firestoreClient, user.Email)
+		results <- BatchResult{Tasks: tasks, Error: err}
+	}()
+
+	// Goroutine 2: Group Boards
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		boards, err := fetchGroupBoards(ctx, firestoreClient, user.Email)
+		results <- BatchResult{GroupBoards: boards, Error: err}
+	}()
+
+	// Goroutine 3: Private Boards
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		boards, err := fetchPrivateBoards(ctx, firestoreClient, user.Email)
+		results <- BatchResult{PrivateBoards: boards, Error: err}
+	}()
+
+	// รอให้ทุก goroutine เสร็จ
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// รวบรวมผลลัพธ์
+	var tasks, groupBoards, privateBoards []map[string]interface{}
+	for result := range results {
+		if result.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("Failed to fetch data: %v", result.Error),
+			})
+			return
 		}
-		for _, d := range docs {
-			items = append(items, d.Data())
+		if result.Tasks != nil {
+			tasks = result.Tasks
 		}
-		return items
-	}
-
-	// ===== Tasks =====
-	taskDocs, err := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Documents(c).GetAll()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get tasks from Firestore"})
-		return
-	}
-
-	tasks := []map[string]interface{}{}
-	for _, doc := range taskDocs {
-		taskData := doc.Data()
-
-		taskID := doc.Ref.ID
-		taskData["Attachments"] = getSubcollection(fmt.Sprintf("TodayTasks/%s/tasks/%s/Attachments", user.Email, taskID))
-		taskData["Checklists"] = getSubcollection(fmt.Sprintf("TodayTasks/%s/tasks/%s/Checklists", user.Email, taskID))
-
-		tasks = append(tasks, taskData)
-	}
-
-	// ===== Group Boards =====
-	groupBoardDocs, err := firestoreClient.Collection("Boards").Doc(user.Email).Collection("Group_Boards").Documents(c).GetAll()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get Group Boards from Firestore"})
-		return
-	}
-
-	groupBoards := []map[string]interface{}{}
-	for _, boardDoc := range groupBoardDocs {
-		boardData := boardDoc.Data()
-		boardID := boardDoc.Ref.ID
-
-		// Get tasks for this board
-		taskCollectionPath := fmt.Sprintf("Boards/%s/Group_Boards/%s/tasks", user.Email, boardID)
-		taskDocs, err := firestoreClient.Collection(taskCollectionPath).Documents(c).GetAll()
-		if err == nil {
-			boardTasks := []map[string]interface{}{}
-			for _, taskDoc := range taskDocs {
-				taskData := taskDoc.Data()
-				taskID := taskDoc.Ref.ID
-
-				// Add subcollections to each task with correct paths and field names
-				taskData["Assigned"] = getSubcollection(fmt.Sprintf("Boards/%s/Group_Boards/%s/tasks/%s/Assigned", user.Email, boardID, taskID))
-				taskData["Attachments"] = getSubcollection(fmt.Sprintf("Boards/%s/Group_Boards/%s/tasks/%s/Attachments", user.Email, boardID, taskID))
-				taskData["Checklists"] = getSubcollection(fmt.Sprintf("Boards/%s/Group_Boards/%s/tasks/%s/Checklists", user.Email, boardID, taskID))
-
-				boardTasks = append(boardTasks, taskData)
-			}
-			boardData["tasks"] = boardTasks
+		if result.GroupBoards != nil {
+			groupBoards = result.GroupBoards
 		}
-
-		groupBoards = append(groupBoards, boardData)
-	}
-
-	// ===== Private Boards =====
-	privateBoardDocs, err := firestoreClient.Collection("Boards").Doc(user.Email).Collection("Private_Boards").Documents(c).GetAll()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get Private Boards from Firestore"})
-		return
-	}
-
-	privateBoards := []map[string]interface{}{}
-	for _, boardDoc := range privateBoardDocs {
-		boardData := boardDoc.Data()
-		boardID := boardDoc.Ref.ID
-
-		// Get tasks for this board
-		taskCollectionPath := fmt.Sprintf("Boards/%s/Private_Boards/%s/tasks", user.Email, boardID)
-		taskDocs, err := firestoreClient.Collection(taskCollectionPath).Documents(c).GetAll()
-		if err == nil {
-			boardTasks := []map[string]interface{}{}
-			for _, taskDoc := range taskDocs {
-				taskData := taskDoc.Data()
-				taskID := taskDoc.Ref.ID
-
-				// Add subcollections to each task with correct paths and field names
-				taskData["Attachments"] = getSubcollection(fmt.Sprintf("Boards/%s/Private_Boards/%s/tasks/%s/Attachments", user.Email, boardID, taskID))
-				taskData["Checklists"] = getSubcollection(fmt.Sprintf("Boards/%s/Private_Boards/%s/tasks/%s/Checklists", user.Email, boardID, taskID))
-
-				boardTasks = append(boardTasks, taskData)
-			}
-			boardData["tasks"] = boardTasks
+		if result.PrivateBoards != nil {
+			privateBoards = result.PrivateBoards
 		}
-
-		privateBoards = append(privateBoards, boardData)
 	}
 
-	// ===== Response =====
+	// === Response ===
 	c.JSON(http.StatusOK, gin.H{
 		"user":       userData,
 		"todaytasks": tasks,
 		"boardgroup": groupBoards,
 		"board":      privateBoards,
 	})
+}
+
+// === Optimized Helper Functions ===
+
+func fetchTasks(ctx context.Context, client *firestore.Client, userEmail string) ([]map[string]interface{}, error) {
+	taskDocs, err := client.Collection("TodayTasks").Doc(userEmail).Collection("tasks").Documents(ctx).GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(taskDocs) == 0 {
+		return []map[string]interface{}{}, nil
+	}
+
+	tasks := make([]map[string]interface{}, 0, len(taskDocs))
+	var wg sync.WaitGroup
+	tasksChan := make(chan map[string]interface{}, len(taskDocs))
+
+	// Concurrent subcollection fetching
+	for _, doc := range taskDocs {
+		wg.Add(1)
+		go func(doc *firestore.DocumentSnapshot) {
+			defer wg.Done()
+
+			taskData := doc.Data()
+			taskID := doc.Ref.ID
+
+			// Fetch subcollections concurrently
+			var subWg sync.WaitGroup
+			attachmentsChan := make(chan []map[string]interface{}, 1)
+			checklistsChan := make(chan []map[string]interface{}, 1)
+
+			subWg.Add(2)
+
+			// Attachments
+			go func() {
+				defer subWg.Done()
+				items := getSubcollectionOptimized(ctx, client, fmt.Sprintf("TodayTasks/%s/tasks/%s/Attachments", userEmail, taskID))
+				attachmentsChan <- items
+			}()
+
+			// Checklists
+			go func() {
+				defer subWg.Done()
+				items := getSubcollectionOptimized(ctx, client, fmt.Sprintf("TodayTasks/%s/tasks/%s/Checklists", userEmail, taskID))
+				checklistsChan <- items
+			}()
+
+			subWg.Wait()
+			close(attachmentsChan)
+			close(checklistsChan)
+
+			taskData["Attachments"] = <-attachmentsChan
+			taskData["Checklists"] = <-checklistsChan
+			tasksChan <- taskData
+		}(doc)
+	}
+
+	wg.Wait()
+	close(tasksChan)
+
+	for task := range tasksChan {
+		tasks = append(tasks, task)
+	}
+
+	return tasks, nil
+}
+
+func fetchGroupBoards(ctx context.Context, client *firestore.Client, userEmail string) ([]map[string]interface{}, error) {
+	boardDocs, err := client.Collection("Boards").Doc(userEmail).Collection("Group_Boards").Documents(ctx).GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(boardDocs) == 0 {
+		return []map[string]interface{}{}, nil
+	}
+
+	boards := make([]map[string]interface{}, 0, len(boardDocs))
+	var wg sync.WaitGroup
+	boardsChan := make(chan map[string]interface{}, len(boardDocs))
+
+	for _, boardDoc := range boardDocs {
+		wg.Add(1)
+		go func(boardDoc *firestore.DocumentSnapshot) {
+			defer wg.Done()
+
+			boardData := boardDoc.Data()
+			boardID := boardDoc.Ref.ID
+
+			// Fetch board tasks
+			taskCollectionPath := fmt.Sprintf("Boards/%s/Group_Boards/%s/tasks", userEmail, boardID)
+			boardTasks := fetchBoardTasks(ctx, client, taskCollectionPath, userEmail, boardID, "Group_Boards")
+			boardData["tasks"] = boardTasks
+
+			boardsChan <- boardData
+		}(boardDoc)
+	}
+
+	wg.Wait()
+	close(boardsChan)
+
+	for board := range boardsChan {
+		boards = append(boards, board)
+	}
+
+	return boards, nil
+}
+
+func fetchPrivateBoards(ctx context.Context, client *firestore.Client, userEmail string) ([]map[string]interface{}, error) {
+	boardDocs, err := client.Collection("Boards").Doc(userEmail).Collection("Private_Boards").Documents(ctx).GetAll()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(boardDocs) == 0 {
+		return []map[string]interface{}{}, nil
+	}
+
+	boards := make([]map[string]interface{}, 0, len(boardDocs))
+	var wg sync.WaitGroup
+	boardsChan := make(chan map[string]interface{}, len(boardDocs))
+
+	for _, boardDoc := range boardDocs {
+		wg.Add(1)
+		go func(boardDoc *firestore.DocumentSnapshot) {
+			defer wg.Done()
+
+			boardData := boardDoc.Data()
+			boardID := boardDoc.Ref.ID
+
+			// Fetch board tasks
+			taskCollectionPath := fmt.Sprintf("Boards/%s/Private_Boards/%s/tasks", userEmail, boardID)
+			boardTasks := fetchBoardTasks(ctx, client, taskCollectionPath, userEmail, boardID, "Private_Boards")
+			boardData["tasks"] = boardTasks
+
+			boardsChan <- boardData
+		}(boardDoc)
+	}
+
+	wg.Wait()
+	close(boardsChan)
+
+	for board := range boardsChan {
+		boards = append(boards, board)
+	}
+
+	return boards, nil
+}
+
+func fetchBoardTasks(ctx context.Context, client *firestore.Client, taskCollectionPath, userEmail, boardID, boardType string) []map[string]interface{} {
+	taskDocs, err := client.Collection(taskCollectionPath).Documents(ctx).GetAll()
+	if err != nil {
+		return []map[string]interface{}{}
+	}
+
+	if len(taskDocs) == 0 {
+		return []map[string]interface{}{}
+	}
+
+	tasks := make([]map[string]interface{}, 0, len(taskDocs))
+	var wg sync.WaitGroup
+	tasksChan := make(chan map[string]interface{}, len(taskDocs))
+
+	for _, taskDoc := range taskDocs {
+		wg.Add(1)
+		go func(taskDoc *firestore.DocumentSnapshot) {
+			defer wg.Done()
+
+			taskData := taskDoc.Data()
+			taskID := taskDoc.Ref.ID
+
+			// Concurrent subcollection fetching
+			var subWg sync.WaitGroup
+			attachmentsChan := make(chan []map[string]interface{}, 1)
+			checklistsChan := make(chan []map[string]interface{}, 1)
+
+			subWg.Add(2)
+
+			// Attachments
+			go func() {
+				defer subWg.Done()
+				path := fmt.Sprintf("Boards/%s/%s/%s/tasks/%s/Attachments", userEmail, boardType, boardID, taskID)
+				items := getSubcollectionOptimized(ctx, client, path)
+				attachmentsChan <- items
+			}()
+
+			// Checklists
+			go func() {
+				defer subWg.Done()
+				path := fmt.Sprintf("Boards/%s/%s/%s/tasks/%s/Checklists", userEmail, boardType, boardID, taskID)
+				items := getSubcollectionOptimized(ctx, client, path)
+				checklistsChan <- items
+			}()
+
+			// เพิ่ม Assigned สำหรับ Group Boards
+			var assignedChan chan []map[string]interface{}
+			if boardType == "Group_Boards" {
+				assignedChan = make(chan []map[string]interface{}, 1)
+				subWg.Add(1)
+				go func() {
+					defer subWg.Done()
+					path := fmt.Sprintf("Boards/%s/%s/%s/tasks/%s/Assigned", userEmail, boardType, boardID, taskID)
+					items := getSubcollectionOptimized(ctx, client, path)
+					assignedChan <- items
+				}()
+			}
+
+			subWg.Wait()
+
+			taskData["Attachments"] = <-attachmentsChan
+			taskData["Checklists"] = <-checklistsChan
+			if assignedChan != nil {
+				taskData["Assigned"] = <-assignedChan
+				close(assignedChan)
+			}
+
+			close(attachmentsChan)
+			close(checklistsChan)
+
+			tasksChan <- taskData
+		}(taskDoc)
+	}
+
+	wg.Wait()
+	close(tasksChan)
+
+	for task := range tasksChan {
+		tasks = append(tasks, task)
+	}
+
+	return tasks
+}
+
+func getSubcollectionOptimized(ctx context.Context, client *firestore.Client, collectionPath string) []map[string]interface{} {
+	docs, err := client.Collection(collectionPath).Documents(ctx).GetAll()
+	if err != nil {
+		return []map[string]interface{}{}
+	}
+
+	if len(docs) == 0 {
+		return []map[string]interface{}{}
+	}
+
+	items := make([]map[string]interface{}, 0, len(docs))
+	for _, d := range docs {
+		items = append(items, d.Data())
+	}
+	return items
+}
+
+type BatchResult struct {
+	Tasks         []map[string]interface{} `json:"tasks"`
+	GroupBoards   []map[string]interface{} `json:"groupBoards"`
+	PrivateBoards []map[string]interface{} `json:"privateBoards"`
+	Error         error                    `json:"error,omitempty"`
 }

@@ -27,6 +27,9 @@ func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore
 		routes.DELETE("/delete/:boardID", func(c *gin.Context) {
 			DeleteBoard(c, db, firestoreClient)
 		})
+		routes.DELETE("/delete", func(c *gin.Context) {
+			DeleteDataBoard(c, db, firestoreClient)
+		})
 	}
 }
 
@@ -276,4 +279,21 @@ func DeleteBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Board deleted successfully",
 	})
+}
+
+func DeleteDataBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	// Get user ID from token and board ID from path parameter
+	userID := c.MustGet("userId").(uint)
+	var dataID dto.DeleteBoardRequest
+	if err := c.ShouldBindJSON(&dataID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	var user model.User
+	if err := db.Raw("SELECT user_id, email FROM user WHERE user_id = ?", userID).Scan(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
+		return
+	}
+
 }

@@ -1,6 +1,7 @@
 package attachments
 
 import (
+	"context"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
@@ -12,6 +13,8 @@ import (
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
 	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"gorm.io/gorm"
 )
 
@@ -20,6 +23,9 @@ func TodayAttachmentsController(router *gin.Engine, db *gorm.DB, firestoreClient
 	{
 		routes.POST("/create", func(c *gin.Context) {
 			CreateTodayAttachmentsFirebase(c, db, firestoreClient)
+		})
+		routes.DELETE("/attachments", func(c *gin.Context) {
+			DeleteTodayTaskAttachment(c, db, firestoreClient)
 		})
 	}
 }
@@ -115,5 +121,58 @@ func CreateTodayAttachmentsFirebase(c *gin.Context, db *gorm.DB, firestoreClient
 	c.JSON(http.StatusOK, gin.H{
 		"message":       "Checklist created successfully",
 		"AttachmentsID": attachmentsID,
+	})
+}
+
+func DeleteTodayTaskAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+	var req dto.DeleteAttachmentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	// Query the email from the database using userId
+	var email string
+	if err := db.Raw("SELECT email FROM user WHERE user_id = ?", userId).Scan(&email).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
+		return
+	}
+
+	ctx := context.Background()
+
+	// Reference to the attachment document
+	// Path: /TodayTasks/{email}/tasks/{taskId}/Attachments/{attachmentId}
+	DocRef := firestoreClient.Collection("TodayTasks").Doc(email).Collection("tasks").Doc(req.TaskID).Collection("Attachments").Doc(req.AttachmentID)
+
+	// Get the current document data to verify it exists
+	docSnapshot, err := DocRef.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Attachment not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve attachment"})
+		return
+	}
+
+	// Check if document exists
+	if !docSnapshot.Exists() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Attachment not found"})
+		return
+	}
+
+	// Delete the document
+	_, err = DocRef.Delete(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete attachment"})
+		return
+	}
+
+	// Return success response
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Attachment deleted successfully",
+		"task_id":       req.TaskID,
+		"attachment_id": req.AttachmentID,
 	})
 }

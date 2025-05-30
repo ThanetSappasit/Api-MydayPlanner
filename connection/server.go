@@ -10,6 +10,7 @@ import (
 	"mydayplanner/controller/checklist"
 	"mydayplanner/controller/report"
 	"mydayplanner/controller/task"
+	"mydayplanner/controller/task/todaytasks"
 	"mydayplanner/controller/user"
 
 	"github.com/gin-contrib/cors"
@@ -38,15 +39,24 @@ func StartServer() {
 	auth.OTPController(router, DB, FB)
 	auth.CaptchaController(router, DB, FB)
 	user.UserController(router, DB, FB)
+
 	board.BoardController(router, DB, FB)
+	board.CreateBoardController(router, DB, FB)
+	board.DeleteBoardController(router, DB, FB)
+
 	admin.AdminController(router, DB, FB)
+
 	report.ReportController(router, DB, FB)
+
 	task.TaskController(router, DB, FB)
-	task.TodayTaskController(router, DB, FB)
+	todaytasks.TodayTaskController(router, DB, FB)
+
 	checklist.TodayChecklistController(router, DB, FB)
 	checklist.ChecklistController(router, DB, FB)
+
 	attachments.AttachmentsController(router, DB, FB)
 	attachments.TodayAttachmentsController(router, DB, FB)
+
 	assigned.AssignedController(router, DB, FB)
 
 	router.Run()

@@ -14,3 +14,8 @@ type CreateAttachmentsTaskRequest struct {
 	Filetype string `json:"filetype" binding:"required"`
 	Isgroup  string `json:"is_group" binding:"required"`
 }
+
+type DeleteAttachmentRequest struct {
+	TaskID       string `json:"task_id" binding:"required"`       // Task ID ที่ attachment อยู่ภายใต้
+	AttachmentID string `json:"attachment_id" binding:"required"` // Attachment ID ที่จะลบ
+}

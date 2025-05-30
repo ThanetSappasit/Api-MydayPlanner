@@ -1,6 +1,7 @@
 package checklist
 
 import (
+	"context"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
@@ -12,6 +13,8 @@ import (
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
 	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"gorm.io/gorm"
 )
 
@@ -20,6 +23,9 @@ func TodayChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *
 	{
 		routes.POST("/create", func(c *gin.Context) {
 			CreateTodayChecklistFirebase(c, db, firestoreClient)
+		})
+		routes.PUT("/adjustchecklist", func(c *gin.Context) {
+			UpdateTodayChecklistFirebase(c, db, firestoreClient)
 		})
 	}
 }
@@ -114,5 +120,69 @@ func CreateTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *
 	c.JSON(http.StatusOK, gin.H{
 		"message":     "Checklist created successfully",
 		"checklistID": checklistID,
+	})
+}
+
+func UpdateTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+	var req dto.AdjustTodayChecklistRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	// Query the email from the database using userId
+	var email string
+	if err := db.Raw("SELECT email FROM user WHERE user_id = ?", userId).Scan(&email).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
+		return
+	}
+
+	ctx := context.Background()
+
+	DocRef := firestoreClient.Collection("TodayTasks").Doc(email).Collection("tasks").Doc(req.TaskID).Collection("Checklists").Doc(req.ChecklistID)
+
+	// Get the current document data to verify it exists
+	docSnapshot, err := DocRef.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Checklist not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve checklist"})
+		return
+	}
+
+	// Check if document exists
+	if !docSnapshot.Exists() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Checklist not found"})
+		return
+	}
+
+	// Prepare update data - only include non-empty fields
+	updateData := make(map[string]interface{})
+
+	if req.ChecklistName != "" {
+		updateData["ChecklistName"] = req.ChecklistName
+	}
+
+	// Check if there's anything to update
+	if len(updateData) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
+		return
+	}
+
+	// Update the document using Set with merge option
+	_, err = DocRef.Set(ctx, updateData, firestore.MergeAll)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update checklist"})
+		return
+	}
+
+	// Return success response
+	c.JSON(http.StatusOK, gin.H{
+		"message":      "Checklist updated successfully",
+		"task_id":      req.TaskID,
+		"checklist_id": req.ChecklistID,
 	})
 }
