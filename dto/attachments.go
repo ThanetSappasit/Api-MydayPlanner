@@ -12,7 +12,6 @@ type CreateAttachmentsTaskRequest struct {
 	Filename string `json:"filename" binding:"required"`
 	Filepath string `json:"filepath" binding:"required"`
 	Filetype string `json:"filetype" binding:"required"`
-	Isgroup  string `json:"is_group" binding:"required"`
 }
 
 type DeleteAttachmentRequest struct {

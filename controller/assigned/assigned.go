@@ -15,12 +15,9 @@ import (
 )
 
 func AssignedController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	routes := router.Group("/assigned", middleware.AccessTokenMiddleware())
-	{
-		routes.POST("/task", func(c *gin.Context) {
-			AssignedTask(c, db, firestoreClient)
-		})
-	}
+	router.POST("/assigned", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+		AssignedTask(c, db, firestoreClient)
+	})
 }
 
 func AssignedTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -76,7 +73,7 @@ func AssignedTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 	}
 
 	// Create Firebase document path
-	docPath := "Boards/" + user.Email + "/Group_Boards/" + req.BoardID + "/tasks/" + req.TaskID + "/Assigned/" + strconv.Itoa(assID)
+	docPath := "Boards/" + user.Email + "/Boards/" + req.BoardID + "/Tasks/" + req.TaskID + "/Assigned/" + strconv.Itoa(assID)
 
 	// Save to Firebase
 	ctx := context.Background()

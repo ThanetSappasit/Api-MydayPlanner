@@ -15,13 +15,10 @@ import (
 	"gorm.io/gorm"
 )
 
-func ChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	routes := router.Group("/checklist", middleware.AccessTokenMiddleware())
-	{
-		routes.POST("/create", func(c *gin.Context) {
-			Checklist(c, db, firestoreClient)
-		})
-	}
+func CreateChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
+	router.POST("/checklist", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+		Checklist(c, db, firestoreClient)
+	})
 }
 
 func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -70,17 +67,9 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		"CreatedAt":     checklist.CreateAt,
 	}
 
-	// Determine board type for path
-	var boardType string
-	if req.Isgroup == "1" {
-		boardType = "Group_Boards"
-	} else {
-		boardType = "Private_Boards"
-	}
-
 	// Create Firebase document path using ChecklistID
-	docPath := fmt.Sprintf("Boards/%s/%s/%s/tasks/%s/Checklists/%d",
-		user.Email, boardType, req.BoardID, req.TaskID, checklistID)
+	docPath := fmt.Sprintf("Boards/%s/Boards/%s/Tasks/%s/Checklists/%d",
+		user.Email, req.BoardID, req.TaskID, checklistID)
 
 	// Save to Firebase document
 	ctx := context.Background()

@@ -74,17 +74,9 @@ func Attachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		"UploadAt":     attachment.UploadAt,
 	}
 
-	// Determine board type for path
-	var boardType string
-	if req.Isgroup == "1" {
-		boardType = "Group_Boards"
-	} else {
-		boardType = "Private_Boards"
-	}
-
 	// Create Firebase collection path (not document path)
-	collectionPath := fmt.Sprintf("Boards/%s/%s/%s/tasks/%s/Attachments",
-		user.Email, boardType, req.BoardID, req.TaskID)
+	collectionPath := fmt.Sprintf("Boards/%s/Boards/%s/Tasks/%s/Attachments",
+		user.Email, req.BoardID, req.TaskID)
 
 	// Save to Firebase using Set() with specific document ID
 	ctx := context.Background()
