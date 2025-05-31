@@ -65,8 +65,11 @@ func GetAllDataFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		close(results)
 	}()
 
-	// รวบรวมผลลัพธ์
-	var tasks, groupBoards, privateBoards []map[string]interface{}
+	// รวบรวมผลลัพธ์ - Initialize เป็น empty array แทน nil
+	tasks := make([]map[string]interface{}, 0)
+	groupBoards := make([]map[string]interface{}, 0)
+	privateBoards := make([]map[string]interface{}, 0)
+
 	for result := range results {
 		if result.Error != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -99,11 +102,11 @@ func GetAllDataFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 func fetchTasks(ctx context.Context, client *firestore.Client, userEmail string) ([]map[string]interface{}, error) {
 	taskDocs, err := client.Collection("TodayTasks").Doc(userEmail).Collection("tasks").Documents(ctx).GetAll()
 	if err != nil {
-		return nil, err
+		return make([]map[string]interface{}, 0), nil // Return empty array instead of nil
 	}
 
 	if len(taskDocs) == 0 {
-		return []map[string]interface{}{}, nil
+		return make([]map[string]interface{}, 0), nil
 	}
 
 	tasks := make([]map[string]interface{}, 0, len(taskDocs))
@@ -190,10 +193,13 @@ func fetchAllBoards(ctx context.Context, client *firestore.Client, userEmail str
 				boardType = "Private" // default เป็น Private ถ้าไม่มี Type
 			}
 
-			// Fetch board tasks
-			taskCollectionPath := fmt.Sprintf("Boards/%s/Boards/%s/Tasks", userEmail, boardID)
+			// Fetch board tasks - จะได้ empty array แทน nil
+			taskCollectionPath := fmt.Sprintf("Boards/%s/Boards/%s/tasks", userEmail, boardID)
 			boardTasks := fetchBoardTasks(ctx, client, taskCollectionPath, userEmail, boardID, boardType)
 			boardData["tasks"] = boardTasks
+
+			// เอา Type ออกจาก response data
+			delete(boardData, "Type")
 
 			boardsChan <- BoardWithType{
 				Data: boardData,
@@ -205,8 +211,10 @@ func fetchAllBoards(ctx context.Context, client *firestore.Client, userEmail str
 	wg.Wait()
 	close(boardsChan)
 
-	// แยกบอร์ดตาม Type
-	var groupBoards, privateBoards []map[string]interface{}
+	// แยกบอร์ดตาม Type - Initialize เป็น empty arrays
+	groupBoards := make([]map[string]interface{}, 0)
+	privateBoards := make([]map[string]interface{}, 0)
+
 	for boardWithType := range boardsChan {
 		if boardWithType.Type == "Group" {
 			groupBoards = append(groupBoards, boardWithType.Data)
@@ -221,11 +229,11 @@ func fetchAllBoards(ctx context.Context, client *firestore.Client, userEmail str
 func fetchBoardTasks(ctx context.Context, client *firestore.Client, taskCollectionPath, userEmail, boardID, boardType string) []map[string]interface{} {
 	taskDocs, err := client.Collection(taskCollectionPath).Documents(ctx).GetAll()
 	if err != nil {
-		return []map[string]interface{}{}
+		return make([]map[string]interface{}, 0) // Return empty array instead of nil
 	}
 
 	if len(taskDocs) == 0 {
-		return []map[string]interface{}{}
+		return make([]map[string]interface{}, 0)
 	}
 
 	tasks := make([]map[string]interface{}, 0, len(taskDocs))
@@ -250,7 +258,7 @@ func fetchBoardTasks(ctx context.Context, client *firestore.Client, taskCollecti
 			// Attachments - ใช้ path ใหม่
 			go func() {
 				defer subWg.Done()
-				path := fmt.Sprintf("Boards/%s/Boards/%s/Tasks/%s/Attachments", userEmail, boardID, taskID)
+				path := fmt.Sprintf("Boards/%s/Boards/%s/tasks/%s/Attachments", userEmail, boardID, taskID)
 				items := getSubcollectionOptimized(ctx, client, path)
 				attachmentsChan <- items
 			}()
@@ -258,7 +266,7 @@ func fetchBoardTasks(ctx context.Context, client *firestore.Client, taskCollecti
 			// Checklists - ใช้ path ใหม่
 			go func() {
 				defer subWg.Done()
-				path := fmt.Sprintf("Boards/%s/Boards/%s/Tasks/%s/Checklists", userEmail, boardID, taskID)
+				path := fmt.Sprintf("Boards/%s/Boards/%s/tasks/%s/Checklists", userEmail, boardID, taskID)
 				items := getSubcollectionOptimized(ctx, client, path)
 				checklistsChan <- items
 			}()
@@ -270,7 +278,7 @@ func fetchBoardTasks(ctx context.Context, client *firestore.Client, taskCollecti
 				subWg.Add(1)
 				go func() {
 					defer subWg.Done()
-					path := fmt.Sprintf("Boards/%s/Boards/%s/Tasks/%s/Assigned", userEmail, boardID, taskID)
+					path := fmt.Sprintf("Boards/%s/Boards/%s/tasks/%s/Assigned", userEmail, boardID, taskID)
 					items := getSubcollectionOptimized(ctx, client, path)
 					assignedChan <- items
 				}()
@@ -305,11 +313,11 @@ func fetchBoardTasks(ctx context.Context, client *firestore.Client, taskCollecti
 func getSubcollectionOptimized(ctx context.Context, client *firestore.Client, collectionPath string) []map[string]interface{} {
 	docs, err := client.Collection(collectionPath).Documents(ctx).GetAll()
 	if err != nil {
-		return []map[string]interface{}{}
+		return make([]map[string]interface{}, 0) // Return empty array instead of nil
 	}
 
 	if len(docs) == 0 {
-		return []map[string]interface{}{}
+		return make([]map[string]interface{}, 0)
 	}
 
 	items := make([]map[string]interface{}, 0, len(docs))
