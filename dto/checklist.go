@@ -16,3 +16,8 @@ type AdjustTodayChecklistRequest struct {
 	ChecklistID   string `json:"checklist_id" binding:"required"` // Checklist ID ที่จะอัปเดต
 	ChecklistName string `json:"checklist_name"`                  // ชื่อ checklist ใหม่
 }
+
+type FinishTodayChecklistRequest struct {
+	TaskID      string `json:"task_id" binding:"required"`      // Task ID ที่ checklist อยู่ภายใต้
+	ChecklistID string `json:"checklist_id" binding:"required"` // Checklist ID ที่จะอัปเดต
+}

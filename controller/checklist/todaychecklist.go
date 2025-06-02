@@ -27,6 +27,9 @@ func TodayChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *
 		routes.PUT("/adjustchecklist", func(c *gin.Context) {
 			UpdateTodayChecklistFirebase(c, db, firestoreClient)
 		})
+		routes.PUT("/finish", func(c *gin.Context) {
+			FinishTodayChecklistFirebase(c, db, firestoreClient)
+		})
 	}
 }
 
@@ -185,4 +188,72 @@ func UpdateTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *
 		"task_id":      req.TaskID,
 		"checklist_id": req.ChecklistID,
 	})
+}
+
+func FinishTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+	var req dto.FinishTodayChecklistRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	// Query the email from the database using userId
+	var email string
+	if err := db.Raw("SELECT email FROM user WHERE user_id = ?", userId).Scan(&email).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
+		return
+	}
+
+	ctx := context.Background()
+
+	DocRef := firestoreClient.Collection("TodayTasks").Doc(email).Collection("tasks").Doc(req.TaskID).Collection("Checklists").Doc(req.ChecklistID)
+
+	// Get the current document data to verify it exists
+	docSnapshot, err := DocRef.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Checklist not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve checklist"})
+		return
+	}
+
+	// Check if document exists
+	if !docSnapshot.Exists() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Checklist not found"})
+		return
+	}
+
+	// เช็คสถานะ Archived ปัจจุบัน
+	var currentArchived bool
+	if archivedValue, exists := docSnapshot.Data()["Archived"]; exists {
+		if archived, ok := archivedValue.(bool); ok {
+			currentArchived = archived
+		}
+	}
+
+	// สลับค่า Archived
+	newArchivedValue := !currentArchived
+
+	// อัพเดทสถานะ Archived ใช้ DocRef แทน docSnapshot
+	_, err = DocRef.Update(ctx, []firestore.Update{
+		{Path: "Archived", Value: newArchivedValue},
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update checklist archive status"})
+		return
+	}
+
+	// ข้อความตอบกลับที่เหมาะสมตามสถานะใหม่
+	var message string
+	if newArchivedValue {
+		message = "Checklist archived successfully"
+	} else {
+		message = "Checklist unarchived successfully"
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": message})
 }
