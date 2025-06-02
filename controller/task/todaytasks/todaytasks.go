@@ -216,9 +216,29 @@ func FinishTodayTaskFirebase(c *gin.Context, db *gorm.DB, firestoreClient *fires
 
 	docRef := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(req.TaskID)
 
-	_, err := docRef.Update(c, []firestore.Update{
-		{Path: "Archived", Value: true},
+	// ดึงข้อมูล task ปัจจุบันเพื่อเช็คสถานะ Archived
+	doc, err := docRef.Get(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get task"})
+		return
+	}
+
+	// เช็คสถานะ Archived ปัจจุบัน
+	var currentArchived bool
+	if archivedValue, exists := doc.Data()["Archived"]; exists {
+		if archived, ok := archivedValue.(bool); ok {
+			currentArchived = archived
+		}
+	}
+
+	// สลับค่า Archived
+	newArchivedValue := !currentArchived
+
+	// อัพเดทสถานะ Archived
+	_, err = docRef.Update(c, []firestore.Update{
+		{Path: "Archived", Value: newArchivedValue},
 	})
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task archive status"})
 		return
