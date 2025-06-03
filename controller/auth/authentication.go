@@ -325,13 +325,13 @@ func NewAccessToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 	}
 	// ตรวจสอบว่า token ถูก revoke หรือไม่
 	if tokenData.Revoked {
-		c.JSON(401, gin.H{"error": "Token has been revoked"})
+		c.JSON(403, gin.H{"error": "Token has been revoked"})
 		return
 	}
 
 	// ตรวจสอบว่า token หมดอายุหรือไม่ (เช็คอีกครั้งจากฐานข้อมูล)
 	if tokenData.CreatedAt+tokenData.ExpiresIn < time.Now().Unix() {
-		c.JSON(401, gin.H{"error": "Token has expired"})
+		c.JSON(440, gin.H{"error": "Token has expired"})
 		return
 	}
 	// ตรวจสอบ token ที่ส่งมากับ hash ที่เก็บไว้
