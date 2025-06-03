@@ -51,6 +51,7 @@ func StartServer() {
 
 	report.ReportController(router, DB, FB)
 
+	task.TaskController(router, DB, FB)
 	task.CreateTaskController(router, DB, FB)
 	task.UpdateTaskController(router, DB, FB)
 	task.DeleteTaskController(router, DB, FB)
@@ -58,7 +59,7 @@ func StartServer() {
 	todaytasks.DeleteTodayTaskController(router, DB, FB)
 
 	checklist.TodayChecklistController(router, DB, FB)
-	checklist.CreateChecklistController(router, DB, FB)
+	checklist.ChecklistController(router, DB, FB)
 
 	attachments.AttachmentsController(router, DB, FB)
 	attachments.TodayAttachmentsController(router, DB, FB)

@@ -18,3 +18,7 @@ type AdjustBoardRequest struct {
 	BoardID   string `json:"board_id" validate:"required"`
 	BoardName string `json:"board_name" validate:"required"`
 }
+
+type InviteBoardRequest struct {
+	BoardID string `json:"board_id" validate:"required"`
+}
