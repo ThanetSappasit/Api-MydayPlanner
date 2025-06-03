@@ -325,7 +325,7 @@ func NewAccessToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 	}
 	// ตรวจสอบว่า token ถูก revoke หรือไม่
 	if tokenData.Revoked {
-		c.JSON(401, gin.H{"error": "Token has been revoked"})
+		c.JSON(403, gin.H{"error": "Token has been revoked"})
 		return
 	}
 
