@@ -331,13 +331,13 @@ func NewAccessToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 
 	// ตรวจสอบว่า token หมดอายุหรือไม่ (เช็คอีกครั้งจากฐานข้อมูล)
 	if tokenData.CreatedAt+tokenData.ExpiresIn < time.Now().Unix() {
-		c.JSON(440, gin.H{"error": "Token has expired"})
+		c.JSON(401, gin.H{"error": "Token has expired"})
 		return
 	}
 	// ตรวจสอบ token ที่ส่งมากับ hash ที่เก็บไว้
 	hash := sha256.Sum256([]byte(refreshToken))
 	if err := bcrypt.CompareHashAndPassword([]byte(tokenData.RefreshToken), hash[:]); err != nil {
-		c.JSON(401, gin.H{"error": "Invalid refresh token"})
+		c.JSON(440, gin.H{"error": "Invalid refresh token"})
 		return
 	}
 
