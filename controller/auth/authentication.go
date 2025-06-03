@@ -337,7 +337,7 @@ func NewAccessToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 	// ตรวจสอบ token ที่ส่งมากับ hash ที่เก็บไว้
 	hash := sha256.Sum256([]byte(refreshToken))
 	if err := bcrypt.CompareHashAndPassword([]byte(tokenData.RefreshToken), hash[:]); err != nil {
-		c.JSON(440, gin.H{"error": "Invalid refresh token"})
+		c.JSON(401, gin.H{"error": "Invalid refresh token"})
 		return
 	}
 
