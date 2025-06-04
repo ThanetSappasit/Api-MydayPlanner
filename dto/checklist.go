@@ -27,3 +27,13 @@ type AdjustChecklistRequest struct {
 	ChecklistID   string `json:"checklist_id" binding:"required"`
 	ChecklistName string `json:"checklist_name" binding:"required"`
 }
+
+type DeleteChecklistRequest struct {
+	TaskID      string   `json:"task_id" binding:"required"`
+	ChecklistID []string `json:"checklist_id" binding:"required"` // ใช้ []string เพื่อรองรับการลบหลาย task
+}
+
+type DeleteChecklistTodayRequest struct {
+	TaskID      string `json:"task_id" binding:"required"`
+	ChecklistID string `json:"checklist_id" binding:"required"` // ใช้ []string เพื่อรองรับการลบหลาย task
+}

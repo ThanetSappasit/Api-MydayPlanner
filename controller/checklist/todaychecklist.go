@@ -30,6 +30,9 @@ func TodayChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *
 		routes.PUT("/finish", func(c *gin.Context) {
 			FinishTodayChecklistFirebase(c, db, firestoreClient)
 		})
+		routes.DELETE("/checklist", func(c *gin.Context) {
+			DeleteTodayChecklistFirebase(c, db, firestoreClient)
+		})
 	}
 }
 
@@ -256,4 +259,56 @@ func FinishTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": message})
+}
+
+func DeleteTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+	var req dto.DeleteChecklistTodayRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	// Query the email from the database using userId
+	var email string
+	if err := db.Raw("SELECT email FROM user WHERE user_id = ?", userId).Scan(&email).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
+		return
+	}
+
+	ctx := context.Background()
+
+	// Reference to the attachment document
+	// Path: /TodayTasks/{email}/tasks/{taskId}/Attachments/{attachmentId}
+	DocRef := firestoreClient.Collection("TodayTasks").Doc(email).Collection("tasks").Doc(req.TaskID).Collection("Checklists").Doc(req.ChecklistID)
+
+	// Get the current document data to verify it exists
+	docSnapshot, err := DocRef.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Checklist not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve Checklist"})
+		return
+	}
+
+	// Check if document exists
+	if !docSnapshot.Exists() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Checklist not found"})
+		return
+	}
+
+	// Delete the document
+	_, err = DocRef.Delete(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete Checklist"})
+		return
+	}
+
+	// Return success response
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Attachment deleted successfully",
+		"attachment_id": req.ChecklistID,
+	})
 }

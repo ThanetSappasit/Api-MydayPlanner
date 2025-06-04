@@ -18,4 +18,7 @@ func ChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *fires
 	router.PUT("/checklistfinish/:checklistid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
 		FinishChecklist(c, db, firestoreClient)
 	})
+	router.DELETE("/checklist/:boardid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+		DeleteChecklist(c, db, firestoreClient)
+	})
 }

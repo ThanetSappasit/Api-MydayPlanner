@@ -12,7 +12,6 @@ import (
 	"mydayplanner/controller/report"
 	"mydayplanner/controller/task"
 	"mydayplanner/controller/task/todaytasks"
-	"mydayplanner/controller/user"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -40,9 +39,6 @@ func StartServer() {
 	auth.OTPController(router, DB, FB)
 	auth.CaptchaController(router, DB, FB)
 
-	user.UserController(router, DB, FB)
-	user.ReadUserController(router, DB, FB)
-
 	board.BoardController(router, DB, FB)
 	board.CreateBoardController(router, DB, FB)
 	board.DeleteBoardController(router, DB, FB)
@@ -66,7 +62,7 @@ func StartServer() {
 
 	assigned.AssignedController(router, DB, FB)
 
-	controller.OrphanedController(router, DB, FB)
+	controller.UserController(router, DB, FB)
 
 	router.Run()
 }

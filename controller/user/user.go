@@ -2,7 +2,6 @@ package user
 
 import (
 	"mydayplanner/dto"
-	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
 
@@ -11,18 +10,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
-
-func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	routes := router.Group("/user", middleware.AccessTokenMiddleware())
-	{
-		routes.PUT("/updateprofile", func(c *gin.Context) {
-			UpdateProfileUser(c, db, firestoreClient)
-		})
-		routes.DELETE("/account", func(c *gin.Context) {
-			DeleteUser(c, db, firestoreClient)
-		})
-	}
-}
 
 func UpdateProfileUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
