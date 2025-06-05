@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"mydayplanner/dto"
-	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
 	"strconv"
@@ -18,20 +17,10 @@ import (
 	"gorm.io/gorm"
 )
 
-func TodayAttachmentsController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	routes := router.Group("/todayattechments", middleware.AccessTokenMiddleware())
-	{
-		routes.POST("/create", func(c *gin.Context) {
-			CreateTodayAttachmentsFirebase(c, db, firestoreClient)
-		})
-		routes.DELETE("/attachments", func(c *gin.Context) {
-			DeleteTodayTaskAttachment(c, db, firestoreClient)
-		})
-	}
-}
-
 func CreateTodayAttachmentsFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
+	taskId := c.Param("taskid")
+
 	var req dto.CreateAttachmentsTodayTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
@@ -45,7 +34,7 @@ func CreateTodayAttachmentsFirebase(c *gin.Context, db *gorm.DB, firestoreClient
 	}
 
 	// ตรวจสอบว่า task มีอยู่จริงหรือไม่
-	taskDoc, err := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(req.TaskID).Get(c)
+	taskDoc, err := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(taskId).Get(c)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
 		return
@@ -56,7 +45,7 @@ func CreateTodayAttachmentsFirebase(c *gin.Context, db *gorm.DB, firestoreClient
 	}
 
 	// ดึงข้อมูล attachmentsID ทั้งหมดที่มีอยู่
-	attachmentsIter := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(req.TaskID).Collection("Attachments").Documents(c)
+	attachmentsIter := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(taskId).Collection("Attachments").Documents(c)
 	defer attachmentsIter.Stop()
 
 	existingAttachmentsIDs := make(map[int]bool)
@@ -112,7 +101,7 @@ func CreateTodayAttachmentsFirebase(c *gin.Context, db *gorm.DB, firestoreClient
 	}
 
 	// สร้าง Attachments ใหม่
-	_, err = firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(req.TaskID).Collection("Attachments").Doc(attachmentsID).Set(c, attachmentsData)
+	_, err = firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(taskId).Collection("Attachments").Doc(attachmentsID).Set(c, attachmentsData)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to create checklist in Firestore: %v", err)})
 		return

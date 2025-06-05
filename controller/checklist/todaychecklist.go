@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"mydayplanner/dto"
-	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
 	"strconv"
@@ -18,26 +17,9 @@ import (
 	"gorm.io/gorm"
 )
 
-func TodayChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	routes := router.Group("/todaychecklist", middleware.AccessTokenMiddleware())
-	{
-		routes.POST("/create", func(c *gin.Context) {
-			CreateTodayChecklistFirebase(c, db, firestoreClient)
-		})
-		routes.PUT("/adjustchecklist", func(c *gin.Context) {
-			UpdateTodayChecklistFirebase(c, db, firestoreClient)
-		})
-		routes.PUT("/finish", func(c *gin.Context) {
-			FinishTodayChecklistFirebase(c, db, firestoreClient)
-		})
-		routes.DELETE("/checklist", func(c *gin.Context) {
-			DeleteTodayChecklistFirebase(c, db, firestoreClient)
-		})
-	}
-}
-
 func CreateTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
+	taskId := c.Param("taskid")
 	var req dto.CreateChecklistTodayTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
@@ -51,7 +33,7 @@ func CreateTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *
 	}
 
 	// ตรวจสอบว่า task มีอยู่จริงหรือไม่
-	taskDoc, err := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(req.TaskID).Get(c)
+	taskDoc, err := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(taskId).Get(c)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
 		return
@@ -62,7 +44,7 @@ func CreateTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *
 	}
 
 	// ดึงข้อมูล checklistID ทั้งหมดที่มีอยู่
-	checklistIter := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(req.TaskID).Collection("Checklists").Documents(c)
+	checklistIter := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(taskId).Collection("Checklists").Documents(c)
 	defer checklistIter.Stop()
 
 	existingChecklistIDs := make(map[int]bool)
@@ -117,7 +99,7 @@ func CreateTodayChecklistFirebase(c *gin.Context, db *gorm.DB, firestoreClient *
 	}
 
 	// สร้าง checklist ใหม่
-	_, err = firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(req.TaskID).Collection("Checklists").Doc(checklistID).Set(c, checklistData)
+	_, err = firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(taskId).Collection("Checklists").Doc(checklistID).Set(c, checklistData)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to create checklist in Firestore: %v", err)})
 		return

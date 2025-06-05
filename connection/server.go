@@ -8,7 +8,6 @@ import (
 	"mydayplanner/controller/attachments"
 	"mydayplanner/controller/auth"
 	"mydayplanner/controller/board"
-	"mydayplanner/controller/checklist"
 	"mydayplanner/controller/report"
 	"mydayplanner/controller/task"
 	"mydayplanner/controller/task/todaytasks"
@@ -54,15 +53,14 @@ func StartServer() {
 	todaytasks.TodayTaskController(router, DB, FB)
 	todaytasks.DeleteTodayTaskController(router, DB, FB)
 
-	checklist.TodayChecklistController(router, DB, FB)
-	checklist.ChecklistController(router, DB, FB)
-
 	attachments.AttachmentsController(router, DB, FB)
-	attachments.TodayAttachmentsController(router, DB, FB)
 
 	assigned.AssignedController(router, DB, FB)
 
 	controller.UserController(router, DB, FB)
+	controller.ChecklistController(router, DB, FB)
+	controller.TodayChecklistController(router, DB, FB)
+	controller.TodayAttachmentsController(router, DB, FB)
 
 	router.Run()
 }
