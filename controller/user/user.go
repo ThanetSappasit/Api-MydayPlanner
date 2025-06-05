@@ -93,3 +93,12 @@ func DeleteUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		c.JSON(http.StatusOK, gin.H{"message": "User deleted successfully"})
 	}
 }
+
+func GetAllUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	var users []map[string]interface{}
+	if err := db.Table("user").Select("user_id, email, name, role, profile, is_active, is_verify, create_at").Scan(&users).Error; err != nil {
+		c.JSON(500, gin.H{"error": "Database error"})
+		return
+	}
+	c.JSON(200, users)
+}
