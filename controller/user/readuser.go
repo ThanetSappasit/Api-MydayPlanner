@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"mydayplanner/model"
 	"net/http"
+	"sort"
 	"sync"
+	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
@@ -81,6 +83,11 @@ func GetAllDataFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		}
 	}
 
+	// === เรียงลำดับข้อมูล ===
+	sortTasksByCreatedAt(tasks)
+	sortBoardsByCreatedAt(groupBoards)
+	sortBoardsByCreatedAt(privateBoards)
+
 	// === Response ===
 	c.JSON(http.StatusOK, gin.H{
 		"user":       userData,
@@ -88,6 +95,96 @@ func GetAllDataFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		"boardgroup": groupBoards,
 		"board":      privateBoards,
 	})
+}
+
+// ฟังก์ชันเรียงลำดับ Tasks ตาม CreatedAt (เก่าสุดก่อน)
+func sortTasksByCreatedAt(tasks []map[string]interface{}) {
+	sort.Slice(tasks, func(i, j int) bool {
+		timeI := getTimeFromInterface(tasks[i]["CreatedAt"])
+		timeJ := getTimeFromInterface(tasks[j]["CreatedAt"])
+		return timeI.Before(timeJ)
+	})
+
+	// เรียงลำดับ subcollections ในแต่ละ task
+	for _, task := range tasks {
+		if attachments, ok := task["Attachments"].([]map[string]interface{}); ok {
+			sortAttachments(attachments)
+		}
+		if checklists, ok := task["Checklists"].([]map[string]interface{}); ok {
+			sortChecklists(checklists)
+		}
+		if assigned, ok := task["Assigned"].([]map[string]interface{}); ok {
+			sortAssigned(assigned)
+		}
+	}
+}
+
+// ฟังก์ชันเรียงลำดับ Boards ตาม CreatedAt (เก่าสุดก่อน)
+func sortBoardsByCreatedAt(boards []map[string]interface{}) {
+	sort.Slice(boards, func(i, j int) bool {
+		timeI := getTimeFromInterface(boards[i]["CreatedAt"])
+		timeJ := getTimeFromInterface(boards[j]["CreatedAt"])
+		return timeI.Before(timeJ)
+	})
+
+	// เรียงลำดับ Tasks ในแต่ละ Board
+	for _, board := range boards {
+		if tasks, ok := board["Tasks"].([]map[string]interface{}); ok {
+			sortTasksByCreatedAt(tasks)
+		}
+	}
+}
+
+// ฟังก์ชันเรียงลำดับ Attachments ตาม UploadAt (เก่าสุดก่อน)
+func sortAttachments(attachments []map[string]interface{}) {
+	sort.Slice(attachments, func(i, j int) bool {
+		timeI := getTimeFromInterface(attachments[i]["UploadAt"])
+		timeJ := getTimeFromInterface(attachments[j]["UploadAt"])
+		return timeI.Before(timeJ)
+	})
+}
+
+// ฟังก์ชันเรียงลำดับ Checklists ตาม CreatedAt (เก่าสุดก่อน)
+func sortChecklists(checklists []map[string]interface{}) {
+	sort.Slice(checklists, func(i, j int) bool {
+		timeI := getTimeFromInterface(checklists[i]["CreatedAt"])
+		timeJ := getTimeFromInterface(checklists[j]["CreatedAt"])
+		return timeI.Before(timeJ)
+	})
+}
+
+// ฟังก์ชันเรียงลำดับ Assigned ตาม assignedAt (เก่าสุดก่อน)
+func sortAssigned(assigned []map[string]interface{}) {
+	sort.Slice(assigned, func(i, j int) bool {
+		timeI := getTimeFromInterface(assigned[i]["assignedAt"])
+		timeJ := getTimeFromInterface(assigned[j]["assignedAt"])
+		return timeI.Before(timeJ)
+	})
+}
+
+// ฟังก์ชันแปลง interface{} เป็น time.Time
+func getTimeFromInterface(timeInterface interface{}) time.Time {
+	if timeInterface == nil {
+		return time.Time{} // return zero time if nil
+	}
+
+	switch t := timeInterface.(type) {
+	case string:
+		// พยายามแปลง string เป็น time
+		if parsedTime, err := time.Parse(time.RFC3339, t); err == nil {
+			return parsedTime
+		}
+		// ถ้าแปลงไม่ได้ให้ลองรูปแบบอื่น
+		if parsedTime, err := time.Parse("2006-01-02T15:04:05.999999Z", t); err == nil {
+			return parsedTime
+		}
+		// ถ้าแปลงไม่ได้เลย return zero time
+		return time.Time{}
+	case time.Time:
+		return t
+	default:
+		return time.Time{} // return zero time for unknown types
+	}
 }
 
 func fetchTasks(ctx context.Context, client *firestore.Client, userEmail string) ([]map[string]interface{}, error) {
