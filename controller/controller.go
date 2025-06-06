@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"mydayplanner/controller/assigned"
 	"mydayplanner/controller/attachments"
 	"mydayplanner/controller/checklist"
 	"mydayplanner/controller/user"
@@ -76,4 +77,10 @@ func TodayAttachmentsController(router *gin.Engine, db *gorm.DB, firestoreClient
 			attachments.DeleteTodayTaskAttachment(c, db, firestoreClient)
 		})
 	}
+}
+
+func AssignedController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
+	router.POST("/assigned", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+		assigned.AssignedTask(c, db, firestoreClient)
+	})
 }

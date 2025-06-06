@@ -4,7 +4,6 @@ import (
 	"log"
 	"mydayplanner/controller"
 	"mydayplanner/controller/admin"
-	"mydayplanner/controller/assigned"
 	"mydayplanner/controller/attachments"
 	"mydayplanner/controller/auth"
 	"mydayplanner/controller/board"
@@ -55,12 +54,11 @@ func StartServer() {
 
 	attachments.AttachmentsController(router, DB, FB)
 
-	assigned.AssignedController(router, DB, FB)
-
 	controller.UserController(router, DB, FB)
 	controller.ChecklistController(router, DB, FB)
 	controller.TodayChecklistController(router, DB, FB)
 	controller.TodayAttachmentsController(router, DB, FB)
+	controller.AssignedController(router, DB, FB)
 
 	router.Run()
 }

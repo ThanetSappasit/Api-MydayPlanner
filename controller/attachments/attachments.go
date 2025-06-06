@@ -141,7 +141,6 @@ func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 	c.JSON(200, gin.H{"message": "attachments deleted successfully"})
 }
 
-// Helper function - คุณต้องสร้าง function นี้เพื่อดึง email จาก userID
 func getUserEmail(userID uint, db *gorm.DB) (string, error) {
 	var user struct {
 		UserID uint

@@ -13,41 +13,65 @@ import (
 
 func UpdateProfileUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
+
 	var updateProfile dto.UpdateProfileRequest
 	if err := c.ShouldBindJSON(&updateProfile); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
-	var user model.User
-	result := db.First(&user, userId)
-	if result.Error != nil {
-		c.JSON(500, gin.H{"error": "Database error"})
+
+	// Validate if there's anything to update
+	if updateProfile.Name == "" && updateProfile.HashedPassword == "" && updateProfile.Profile == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No data to update"})
 		return
 	}
+
+	// Build update map efficiently
+	updateMap := make(map[string]interface{})
+
+	// Only add non-empty fields
+	if updateProfile.Name != "" {
+		updateMap["name"] = updateProfile.Name
+	}
+	if updateProfile.Profile != "" {
+		updateMap["profile"] = updateProfile.Profile
+	}
+
+	// Handle password hashing concurrently if password is provided
 	if updateProfile.HashedPassword != "" {
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(updateProfile.HashedPassword), bcrypt.DefaultCost)
-		if err != nil {
+		// Use channel for concurrent password hashing
+		hashChan := make(chan struct {
+			hashedPassword string
+			err            error
+		}, 1)
+
+		go func() {
+			hashedPassword, err := bcrypt.GenerateFromPassword([]byte(updateProfile.HashedPassword), bcrypt.DefaultCost)
+			hashChan <- struct {
+				hashedPassword string
+				err            error
+			}{string(hashedPassword), err}
+		}()
+
+		// Get result from goroutine
+		hashResult := <-hashChan
+		if hashResult.err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
 			return
 		}
-		updateProfile.HashedPassword = string(hashedPassword)
+		updateMap["hashed_password"] = hashResult.hashedPassword
 	}
 
-	updates := map[string]interface{}{
-		"name":            updateProfile.Name,
-		"hashed_password": updateProfile.HashedPassword,
-		"profile":         updateProfile.Profile,
-	}
-
-	updateMap := make(map[string]interface{})
-	for key, value := range updates {
-		if value != "" {
-			updateMap[key] = value
-		}
-	}
-
-	if err := db.Model(&user).Updates(updateMap).Error; err != nil {
+	// Single database operation - update directly without SELECT
+	result := db.Model(&model.User{}).Where("id = ?", userId).Updates(updateMap)
+	if result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user profile"})
+		return
+	}
+
+	// Check if any rows were affected (user exists)
+	if result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
@@ -57,39 +81,64 @@ func UpdateProfileUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.C
 func DeleteUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
 
-	const checkSql = `
-        SELECT DISTINCT *
-        FROM user
-        LEFT JOIN board ON user.user_id = board.create_by
-        LEFT JOIN board_user ON user.user_id = board_user.user_id
-        WHERE user.user_id = ?
-            AND (board.board_id IS NOT NULL OR board_user.board_id IS NOT NULL)
-    `
-	var results []map[string]interface{}
-	if err := db.Raw(checkSql, userId).Scan(&results).Error; err != nil {
+	// Use channels for concurrent checking
+	type checkResult struct {
+		hasBoards bool
+		err       error
+	}
+
+	checkChan := make(chan checkResult, 1)
+
+	// Check board associations concurrently
+	go func() {
+		// More efficient query using COUNT with LIMIT 1
+		const checkSql = `
+			SELECT COUNT(*) > 0 as has_boards FROM (
+				SELECT 1 FROM board WHERE create_by = ? LIMIT 1
+				UNION ALL
+				SELECT 1 FROM board_user WHERE user_id = ? LIMIT 1
+			) as board_check`
+
+		var hasBoards bool
+		err := db.Raw(checkSql, userId, userId).Scan(&hasBoards).Error
+		checkChan <- checkResult{hasBoards: hasBoards, err: err}
+	}()
+
+	// Get result from goroutine
+	result := <-checkChan
+	if result.err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check user associations"})
 		return
 	}
 
-	//เช็คอีเมลก่อนว่ามีบอร์ดงานไหมถ้ามีไม่ให้ลบ ถ้าไม่มีลบเลย
-	if len(results) > 0 {
-		const updateSql = `
-                UPDATE user
-                SET is_active = "2"
-                WHERE user_id = ?;`
-		if err := db.Exec(updateSql, userId).Error; err != nil {
+	// Optimized transaction handling
+	if result.hasBoards {
+		// Deactivate user
+		updateResult := db.Model(&model.User{}).Where("user_id = ?", userId).Update("is_active", "2")
+		if updateResult.Error != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to deactivate user"})
 			return
 		}
+
+		if updateResult.RowsAffected == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{"message": "User deactivated successfully"})
 	} else {
-		const deleteSql = `
-                DELETE FROM user
-                WHERE user_id = ?;`
-		if err := db.Exec(deleteSql, userId).Error; err != nil {
+		// Delete user
+		deleteResult := db.Where("user_id = ?", userId).Delete(&model.User{})
+		if deleteResult.Error != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
 			return
 		}
+
+		if deleteResult.RowsAffected == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{"message": "User deleted successfully"})
 	}
 }
