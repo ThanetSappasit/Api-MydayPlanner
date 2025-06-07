@@ -19,6 +19,8 @@ import (
 func StartServer() {
 	router := gin.Default()
 
+	router.Static("/.well-known", "./static/.well-known")
+
 	DB, err := DBConnection()
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
