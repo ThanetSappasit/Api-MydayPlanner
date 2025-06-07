@@ -7,6 +7,7 @@
       "sha256_cert_fingerprints": [
         "7e:be:12:2e:bf:47:5d:8a:a5:be:c4:9e:d9:13:fd:a6:6c:a4:95:d4:25:8b:f6:34:f9:6c:04:51:0c:6b:7e:32"
       ]
-    }
+    },
+    "paths": [ "/board/*" ]
   }
 ]
