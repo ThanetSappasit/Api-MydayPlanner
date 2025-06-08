@@ -49,7 +49,10 @@ func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 		defer wg.Done()
 		userData, err := fetchUserData(db, userId)
 		if err != nil {
-			errorChan <- fmt.Errorf("failed to get user data: %w", err)
+			select {
+			case errorChan <- fmt.Errorf("failed to get user data: %w", err):
+			default:
+			}
 			return
 		}
 		userChan <- userData
@@ -61,7 +64,10 @@ func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 		defer wg.Done()
 		boardData, err := fetchBoardData(db, userId)
 		if err != nil {
-			errorChan <- fmt.Errorf("failed to get board data: %w", err)
+			select {
+			case errorChan <- fmt.Errorf("failed to get board data: %w", err):
+			default:
+			}
 			return
 		}
 		boardChan <- boardData
@@ -73,16 +79,14 @@ func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 		defer wg.Done()
 		boardGroupData, err := fetchBoardGroupData(db, userId)
 		if err != nil {
-			errorChan <- fmt.Errorf("failed to get boardgroup data: %w", err)
+			select {
+			case errorChan <- fmt.Errorf("failed to get boardgroup data: %w", err):
+			default:
+			}
 			return
 		}
 		boardGroupChan <- boardGroupData
 	}()
-
-	// รอให้ board data เสร็จก่อน เพื่อเอา board IDs
-	var userData map[string]interface{}
-	var boardData []map[string]interface{}
-	var boardGroupData []map[string]interface{}
 
 	// รอผลลัพธ์
 	wg.Wait()
@@ -96,12 +100,13 @@ func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	}
 
 	// รับผลลัพธ์
-	userData = <-userChan
-	boardData = <-boardChan
-	boardGroupData = <-boardGroupChan
+	userData := <-userChan
+	boardData := <-boardChan
+	boardGroupData := <-boardGroupChan
 
 	// 4. Fetch tasks data (ต้องรอ board data ก่อน)
 	allBoardIDs := extractBoardIDs(boardData, boardGroupData)
+	fmt.Printf("Debug: Found %d board IDs: %v\n", len(allBoardIDs), allBoardIDs) // Debug log
 
 	var wg2 sync.WaitGroup
 
@@ -110,9 +115,13 @@ func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 		defer wg2.Done()
 		tasksData, err := fetchTasksDataOptimized(db, allBoardIDs)
 		if err != nil {
-			errorChan <- fmt.Errorf("failed to get tasks data: %w", err)
+			select {
+			case errorChan <- fmt.Errorf("failed to get tasks data: %w", err):
+			default:
+			}
 			return
 		}
+		fmt.Printf("Debug: Found %d tasks\n", len(tasksData)) // Debug log
 		tasksChan <- tasksData
 	}()
 
@@ -122,7 +131,10 @@ func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 		defer wg2.Done()
 		todayTasks, err := fetchTasks(ctx, firestoreClient, userData["Email"].(string))
 		if err != nil {
-			errorChan <- fmt.Errorf("failed to fetch today tasks: %w", err)
+			select {
+			case errorChan <- fmt.Errorf("failed to fetch today tasks: %w", err):
+			default:
+			}
 			return
 		}
 		todayTasksChan <- todayTasks
@@ -172,13 +184,26 @@ func fetchUserData(db *gorm.DB, userId uint) (map[string]interface{}, error) {
 }
 
 func fetchBoardData(db *gorm.DB, userId uint) ([]map[string]interface{}, error) {
-	var boardData []model.Board
+	var boardData []struct {
+		BoardID     uint      `gorm:"column:board_id"`
+		BoardName   string    `gorm:"column:board_name"`
+		CreatedAt   time.Time `gorm:"column:create_at"`
+		CreatedBy   int       `gorm:"column:create_by"`
+		UserName    string    `gorm:"column:name"`
+		UserEmail   string    `gorm:"column:email"`
+		UserProfile string    `gorm:"column:profile"`
+	}
+
 	if err := db.Raw(`SELECT 
 			b.board_id,
 			b.board_name,
 			b.create_at,
-			b.create_by
+			b.create_by,
+			u.name,
+			u.email,
+			u.profile
 		FROM board b
+		INNER JOIN user u ON b.create_by = u.user_id
 		WHERE 
 			b.create_by = ?
 			AND NOT EXISTS (
@@ -195,6 +220,12 @@ func fetchBoardData(db *gorm.DB, userId uint) ([]map[string]interface{}, error) 
 			"BoardName": b.BoardName,
 			"CreatedAt": b.CreatedAt,
 			"CreatedBy": b.CreatedBy,
+			"CreatedByUser": map[string]interface{}{
+				"UserID":  b.CreatedBy,
+				"Name":    b.UserName,
+				"Email":   b.UserEmail,
+				"Profile": b.UserProfile,
+			},
 		})
 	}
 
@@ -203,20 +234,28 @@ func fetchBoardData(db *gorm.DB, userId uint) ([]map[string]interface{}, error) 
 
 func fetchBoardGroupData(db *gorm.DB, userId uint) ([]map[string]interface{}, error) {
 	var boardGroupData []struct {
-		model.Board
-		Token     string    `gorm:"column:token"`
-		ExpiresAt time.Time `gorm:"column:expires_at"`
+		BoardID     uint      `gorm:"column:board_id"`
+		BoardName   string    `gorm:"column:board_name"`
+		CreatedAt   time.Time `gorm:"column:create_at"`
+		CreatedBy   int       `gorm:"column:create_by"`
+		Token       string    `gorm:"column:token"`
+		UserName    string    `gorm:"column:name"`
+		UserEmail   string    `gorm:"column:email"`
+		UserProfile string    `gorm:"column:profile"`
 	}
+
 	if err := db.Raw(`SELECT 
 			b.board_id,
 			b.board_name,
 			b.create_at,
 			b.create_by,
-			bu.added_at as joined_at,
 			bt.token,
-			bt.expires_at
+			u.name,
+			u.email,
+			u.profile
 		FROM board b
 		INNER JOIN board_user bu ON b.board_id = bu.board_id
+		INNER JOIN user u ON b.create_by = u.user_id
 		LEFT JOIN board_token bt ON b.board_id = bt.board_id
 		WHERE bu.user_id = ?`, userId).Scan(&boardGroupData).Error; err != nil {
 		return nil, err
@@ -230,23 +269,29 @@ func fetchBoardGroupData(db *gorm.DB, userId uint) ([]map[string]interface{}, er
 			"CreatedAt": bg.CreatedAt,
 			"CreatedBy": bg.CreatedBy,
 			"Token":     bg.Token,
-			"ExpiresAt": bg.ExpiresAt,
+			"CreatedByUser": map[string]interface{}{
+				"UserID":  bg.CreatedBy,
+				"Name":    bg.UserName,
+				"Email":   bg.UserEmail,
+				"Profile": bg.UserProfile,
+			},
 		})
 	}
 
 	return boardgroup, nil
 }
 
-func extractBoardIDs(boardData, boardGroupData []map[string]interface{}) []int {
-	allBoardIDs := make([]int, 0, len(boardData)+len(boardGroupData))
+// แก้ไขฟังก์ชันนี้ - เปลี่ยนจาก int เป็น uint
+func extractBoardIDs(boardData, boardGroupData []map[string]interface{}) []uint {
+	allBoardIDs := make([]uint, 0, len(boardData)+len(boardGroupData))
 
 	for _, b := range boardData {
-		if boardID, ok := b["BoardID"].(int); ok {
+		if boardID, ok := b["BoardID"].(uint); ok {
 			allBoardIDs = append(allBoardIDs, boardID)
 		}
 	}
 	for _, bg := range boardGroupData {
-		if boardID, ok := bg["BoardID"].(int); ok {
+		if boardID, ok := bg["BoardID"].(uint); ok {
 			allBoardIDs = append(allBoardIDs, boardID)
 		}
 	}
@@ -254,7 +299,8 @@ func extractBoardIDs(boardData, boardGroupData []map[string]interface{}) []int {
 	return allBoardIDs
 }
 
-func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []int) ([]map[string]interface{}, error) {
+// แก้ไขฟังก์ชันนี้ - เปลี่ยน parameter type จาก []int เป็น []uint
+func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint) ([]map[string]interface{}, error) {
 	if len(allBoardIDs) == 0 {
 		return make([]map[string]interface{}, 0), nil
 	}
@@ -266,17 +312,17 @@ func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []int) ([]map[string]inter
 			status, priority, create_by, create_at
 		FROM tasks 
 		WHERE board_id IN (?)`, allBoardIDs).Scan(&tasksData).Error; err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to fetch tasks: %w", err)
 	}
 
 	if len(tasksData) == 0 {
 		return make([]map[string]interface{}, 0), nil
 	}
 
-	// Extract all task IDs
-	taskIDs := make([]int, len(tasksData))
+	// Extract all task IDs - แก้ไขเป็น uint
+	taskIDs := make([]uint, len(tasksData))
 	for i, task := range tasksData {
-		taskIDs[i] = task.TaskID
+		taskIDs[i] = uint(task.TaskID)
 	}
 
 	// Fetch all related data in parallel
@@ -289,7 +335,10 @@ func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []int) ([]map[string]inter
 		defer wg.Done()
 		relatedData, err := fetchAllRelatedData(db, taskIDs)
 		if err != nil {
-			errorChan <- err
+			select {
+			case errorChan <- err:
+			default:
+			}
 			return
 		}
 		relatedDataChan <- relatedData
@@ -332,7 +381,8 @@ func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []int) ([]map[string]inter
 	return tasks, nil
 }
 
-func fetchAllRelatedData(db *gorm.DB, taskIDs []int) (TaskRelatedData, error) {
+// แก้ไขฟังก์ชันนี้ - เปลี่ยน parameter type จาก []int เป็น []uint
+func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 	var wg sync.WaitGroup
 	var checklists []model.Checklist
 	var attachments []model.Attachment
@@ -350,7 +400,10 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []int) (TaskRelatedData, error) {
 		var checklistsData []model.Checklist
 		if err := db.Raw(`SELECT checklist_id, task_id, checklist_name, create_at 
 			FROM checklists WHERE task_id IN (?)`, taskIDs).Scan(&checklistsData).Error; err != nil {
-			errorChan <- fmt.Errorf("failed to fetch checklists: %w", err)
+			select {
+			case errorChan <- fmt.Errorf("failed to fetch checklists: %w", err):
+			default:
+			}
 			return
 		}
 		checklists = checklistsData
@@ -363,7 +416,10 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []int) (TaskRelatedData, error) {
 		var attachmentsData []model.Attachment
 		if err := db.Raw(`SELECT attachment_id, tasks_id, file_name, file_path, file_type, upload_at 
 			FROM attachments WHERE tasks_id IN (?)`, taskIDs).Scan(&attachmentsData).Error; err != nil {
-			errorChan <- fmt.Errorf("failed to fetch attachments: %w", err)
+			select {
+			case errorChan <- fmt.Errorf("failed to fetch attachments: %w", err):
+			default:
+			}
 			return
 		}
 		attachments = attachmentsData
@@ -382,7 +438,10 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []int) (TaskRelatedData, error) {
 			FROM assigned a
 			LEFT JOIN user u ON a.user_id = u.user_id
 			WHERE a.task_id IN (?)`, taskIDs).Scan(&assignedData).Error; err != nil {
-			errorChan <- fmt.Errorf("failed to fetch assigned users: %w", err)
+			select {
+			case errorChan <- fmt.Errorf("failed to fetch assigned users: %w", err):
+			default:
+			}
 			return
 		}
 		assigned = assignedData
