@@ -5,8 +5,6 @@ type CreateChecklistTodayTaskRequest struct {
 }
 
 type CreateChecklistTaskRequest struct {
-	BoardID       string `json:"board_id" binding:"required"`
-	TaskID        string `json:"task_id" binding:"required"`
 	ChecklistName string `json:"checklist_name" binding:"required"`
 }
 
@@ -22,8 +20,6 @@ type FinishTodayChecklistRequest struct {
 }
 
 type AdjustChecklistRequest struct {
-	TaskID        string `json:"task_id" binding:"required"`
-	ChecklistID   string `json:"checklist_id" binding:"required"`
 	ChecklistName string `json:"checklist_name" binding:"required"`
 }
 

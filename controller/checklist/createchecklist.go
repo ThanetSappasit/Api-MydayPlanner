@@ -18,6 +18,7 @@ import (
 
 func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
+	taskIDStr := c.Param("taskid")
 	var req dto.CreateChecklistTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
@@ -32,7 +33,7 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	}
 
 	// Convert string IDs to integers
-	taskID, err := strconv.Atoi(req.TaskID)
+	taskID, err := strconv.Atoi(taskIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
 		return
@@ -53,12 +54,10 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 
 	// Get the generated ChecklistID
 	checklistID := checklist.ChecklistID
-	boardID := req.BoardID
 
 	// Prepare Firebase document data
 	firestoreData := map[string]interface{}{
 		"ChecklistID":   checklistID,
-		"BoardID":       boardID,
 		"TaskID":        taskID,
 		"ChecklistName": checklist.ChecklistName,
 		"CreatedAt":     checklist.CreateAt,
@@ -87,23 +86,10 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 
 func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userID := c.MustGet("userId").(uint)
-
+	checklistID := c.Param("checklistid")
 	var adjustData dto.AdjustChecklistRequest
 	if err := c.ShouldBindJSON(&adjustData); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
-		return
-	}
-
-	// Convert string IDs to integers
-	taskIDInt, err := strconv.Atoi(adjustData.TaskID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid TaskID format"})
-		return
-	}
-
-	checklistIDInt, err := strconv.Atoi(adjustData.ChecklistID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ChecklistID format"})
 		return
 	}
 
@@ -128,7 +114,7 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 
 	// Get current checklist data
 	var currentChecklist model.Checklist
-	if err := db.Where("checklist_id = ? AND task_id = ?", checklistIDInt, taskIDInt).First(&currentChecklist).Error; err != nil {
+	if err := db.Where("checklist_id = ?", checklistID).First(&currentChecklist).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Checklist not found"})
 		} else {
@@ -139,7 +125,7 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 
 	// Get task to find board information
 	var task model.Tasks
-	if err := db.Where("task_id = ?", taskIDInt).First(&task).Error; err != nil {
+	if err := db.Where("task_id = ?", currentChecklist.TaskID).First(&task).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
 		} else {
@@ -153,7 +139,7 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 	if trimmedName == currentChecklist.ChecklistName {
 		c.JSON(http.StatusOK, gin.H{
 			"message":      "No changes detected",
-			"checklist_id": checklistIDInt,
+			"checklist_id": currentChecklist.ChecklistID,
 		})
 		return
 	}
@@ -184,7 +170,7 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 	}()
 
 	// Update in SQL Database
-	result := tx.Model(&model.Checklist{}).Where("checklist_id = ? AND task_id = ?", checklistIDInt, taskIDInt).Updates(updateData)
+	result := tx.Model(&model.Checklist{}).Where("checklist_id = ?", currentChecklist.ChecklistID).Updates(updateData)
 	if result.Error != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -218,7 +204,7 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 
 		checklistDocRef := firestoreClient.
 			Collection("Checklists").
-			Doc(strconv.Itoa(checklistIDInt))
+			Doc(strconv.Itoa(currentChecklist.ChecklistID))
 
 		_, err := checklistDocRef.Update(ctx, firestoreUpdates)
 		errChan <- err
@@ -252,7 +238,7 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 
 	// Get updated checklist data for response
 	var updatedChecklist model.Checklist
-	if err := db.Where("checklist_id = ? AND task_id = ?", checklistIDInt, taskIDInt).First(&updatedChecklist).Error; err != nil {
+	if err := db.Where("checklist_id = ?", currentChecklist.ChecklistID).First(&updatedChecklist).Error; err != nil {
 		// Log error but still return success since update was successful
 		fmt.Printf("Warning: Could not fetch updated checklist data: %v\n", err)
 	}
@@ -260,7 +246,7 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 	// Prepare response data
 	responseData := gin.H{
 		"message":      "Checklist updated successfully",
-		"checklist_id": checklistIDInt,
+		"checklist_id": currentChecklist.ChecklistID,
 	}
 
 	c.JSON(http.StatusOK, responseData)

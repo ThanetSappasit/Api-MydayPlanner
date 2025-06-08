@@ -18,7 +18,7 @@ func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 		// routes.GET("/data", func(c *gin.Context) {
 		// 	user.GetAllDataFirebase(c, db, firestoreClient)
 		// })
-		routes.GET("/alldatauser", func(c *gin.Context) {
+		routes.GET("/data", func(c *gin.Context) {
 			user.AllDataUser(c, db, firestoreClient)
 		})
 		routes.GET("/alluser", func(c *gin.Context) {
@@ -38,10 +38,10 @@ func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore
 }
 
 func ChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	router.POST("/checklist", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+	router.POST("/checklist/:taskid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
 		checklist.Checklist(c, db, firestoreClient)
 	})
-	router.PUT("/checklist", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+	router.PUT("/checklist/:checklistid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
 		checklist.UpdateChecklist(c, db, firestoreClient)
 	})
 	router.PUT("/checklistfinish/:checklistid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
