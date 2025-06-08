@@ -1,6 +1,7 @@
 package task
 
 import (
+	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
 
@@ -10,6 +11,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+func FinishTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
+	router.PUT("/taskfinish/:taskid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+		FinishTask(c, db, firestoreClient)
+	})
+}
 
 func FinishTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userID := c.MustGet("userId").(uint)
@@ -30,7 +37,7 @@ func FinishTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get task data"})
 		return
 	}
-	docRef := firestoreClient.Collection("Boards").Doc(email).Collection("Boards").Doc(fmt.Sprintf("%v", currentTask.BoardID)).Collection("Tasks").Doc(taskID)
+	docRef := firestoreClient.Collection("Boards").Doc(fmt.Sprintf("%v", currentTask.BoardID)).Collection("Tasks").Doc(taskID)
 
 	// ดึงข้อมูล task ปัจจุบันเพื่อเช็คสถานะ Archived
 	doc, err := docRef.Get(c)

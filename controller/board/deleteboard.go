@@ -63,19 +63,11 @@ func DeleteFirebaseBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore
 // deleteBoardRecursively deletes a board and all its subcollections
 func deleteBoardRecursively(ctx context.Context, client *firestore.Client, userEmail, boardID string) error {
 	// Reference to the board document
-	boardRef := client.Collection("Boards").Doc(userEmail).Collection("Boards").Doc(boardID)
+	boardRef := client.Collection("Boards").Doc(boardID)
 
 	// Delete all tasks and their subcollections first
 	if err := deleteTasksRecursively(ctx, client, boardRef); err != nil {
 		return fmt.Errorf("failed to delete tasks: %w", err)
-	}
-
-	// Delete any other subcollections at board level (add more as needed)
-	boardSubcollections := []string{"members", "activities", "labels"} // Add other subcollections if exist
-	for _, subcollection := range boardSubcollections {
-		if err := deleteCollection(ctx, client, boardRef.Collection(subcollection)); err != nil {
-			return fmt.Errorf("failed to delete board subcollection %s: %w", subcollection, err)
-		}
 	}
 
 	// Finally delete the board document itself
@@ -88,7 +80,7 @@ func deleteBoardRecursively(ctx context.Context, client *firestore.Client, userE
 
 // deleteTasksRecursively deletes all tasks and their subcollections
 func deleteTasksRecursively(ctx context.Context, client *firestore.Client, boardRef *firestore.DocumentRef) error {
-	tasksCollection := boardRef.Collection("tasks")
+	tasksCollection := boardRef.Collection("Tasks")
 
 	// Get all task documents
 	taskDocs, err := tasksCollection.Documents(ctx).GetAll()

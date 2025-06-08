@@ -64,9 +64,16 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return
 	}
 
-	// ตรวจสอบว่า task นี้เป็นของ user นี้หรือไม่
-	if currentTask.CreateBy != user.UserID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "You don't have permission to modify this task"})
+	// ตรวจสอบว่า user เป็นสมาชิกของ board หรือไม่
+	var count int64
+	if err := db.Table("board_user").
+		Where("board_id = ? AND user_id = ?", boardIDInt, userID).
+		Count(&count).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check board membership"})
+		return
+	}
+	if count == 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You are not a member of this board"})
 		return
 	}
 
@@ -163,7 +170,7 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 
 	// อัปเดตใน Firebase ถ้ามี updates
 	if len(firestoreUpdates) > 0 {
-		taskDocRef := firestoreClient.Collection("Boards").Doc(user.Email).Collection("Boards").Doc(strconv.Itoa(adjustData.BoardID)).Collection("Tasks").Doc(strconv.Itoa(adjustData.TaskID))
+		taskDocRef := firestoreClient.Collection("Boards").Doc(strconv.Itoa(adjustData.BoardID)).Collection("Tasks").Doc(strconv.Itoa(adjustData.TaskID))
 
 		_, err := taskDocRef.Update(ctx, firestoreUpdates)
 		if err != nil {

@@ -18,6 +18,9 @@ func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 		routes.GET("/data", func(c *gin.Context) {
 			user.GetAllDataFirebase(c, db, firestoreClient)
 		})
+		routes.GET("/alldatauser", func(c *gin.Context) {
+			user.AllDataUser(c, db)
+		})
 		routes.GET("/alluser", func(c *gin.Context) {
 			user.GetAllUser(c, db, firestoreClient)
 		})

@@ -1,7 +1,6 @@
 package checklist
 
 import (
-	"fmt"
 	"mydayplanner/model"
 	"net/http"
 	"time"
@@ -45,7 +44,7 @@ func FinishChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 
 	// แก้ไข path ให้ตรงกับ Firestore structure ที่ถูกต้อง
 	// เปลี่ยน "Checklist" เป็น "Checklists"
-	docRef := firestoreClient.Collection("Boards").Doc(email).Collection("Boards").Doc(fmt.Sprintf("%v", currentTask.BoardID)).Collection("Tasks").Doc(fmt.Sprintf("%v", currentTask.TaskID)).Collection("Checklists").Doc(checklistID)
+	docRef := firestoreClient.Collection("Checklists").Doc(checklistID)
 
 	// ดึงข้อมูล checklist ปัจจุบันเพื่อเช็คสถานะ Archived
 	doc, err := docRef.Get(c)

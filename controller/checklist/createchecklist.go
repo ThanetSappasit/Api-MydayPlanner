@@ -53,23 +53,21 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 
 	// Get the generated ChecklistID
 	checklistID := checklist.ChecklistID
+	boardID := req.BoardID
 
 	// Prepare Firebase document data
 	firestoreData := map[string]interface{}{
 		"ChecklistID":   checklistID,
+		"BoardID":       boardID,
 		"TaskID":        taskID,
 		"ChecklistName": checklist.ChecklistName,
 		"CreatedAt":     checklist.CreateAt,
 		"Archived":      false,
 	}
 
-	// Create Firebase document path using ChecklistID
-	docPath := fmt.Sprintf("Boards/%s/Boards/%s/Tasks/%s/Checklists/%d",
-		user.Email, req.BoardID, req.TaskID, checklistID)
-
 	// Save to Firebase document
 	ctx := context.Background()
-	_, err = firestoreClient.Doc(docPath).Set(ctx, firestoreData)
+	_, err = firestoreClient.Collection("Checklists").Doc(strconv.Itoa(checklistID)).Set(ctx, firestoreData)
 	if err != nil {
 		// Log the error but don't fail the request since SQL save was successful
 		// You might want to implement a retry mechanism or queue for failed Firebase writes
@@ -171,10 +169,6 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 			Path:  "ChecklistName",
 			Value: trimmedName,
 		},
-		{
-			Path:  "UpdatedAt",
-			Value: time.Now(),
-		},
 	}
 
 	// Start database transaction
@@ -222,12 +216,7 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 			}
 		}()
 
-		checklistDocRef := firestoreClient.Collection("Boards").
-			Doc(email).
-			Collection("Boards").
-			Doc(strconv.Itoa(task.BoardID)).
-			Collection("Tasks").
-			Doc(strconv.Itoa(taskIDInt)).
+		checklistDocRef := firestoreClient.
 			Collection("Checklists").
 			Doc(strconv.Itoa(checklistIDInt))
 

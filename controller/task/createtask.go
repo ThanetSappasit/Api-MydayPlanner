@@ -78,13 +78,10 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 	}
 
 	// Set data according to the Firestore structure
-	// แก้ไข path ให้เป็น /Boards/{userEmail}/Boards/{boardID}/Tasks/{taskID}
-	userIDStr := user.Email
 	boardIDStr := strconv.Itoa(task.BoardID)
 	taskIDStr := strconv.Itoa(newTask.TaskID)
 
-	_, err = firestoreClient.Collection("Boards").
-		Doc(userIDStr).
+	_, err = firestoreClient.
 		Collection("Boards").
 		Doc(boardIDStr).
 		Collection("Tasks"). // แก้ไขจาก "tasks" เป็น "Tasks" (uppercase T)

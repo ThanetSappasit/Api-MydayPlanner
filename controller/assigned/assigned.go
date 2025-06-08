@@ -185,10 +185,6 @@ func syncToFirebaseOptimized(client *firestore.Client, assigned model.Assigned, 
 		"assignedAt": assigned.AssignAt,
 	}
 
-	// Optimized path construction
-	docPath := fmt.Sprintf("Boards/%s/Boards/%s/Tasks/%s/Assigned/%d",
-		userEmail, boardID, taskID, assigned.AssID)
-
 	// Retry with exponential backoff
 	const maxRetries = 3
 	baseDelay := 100 * time.Millisecond
@@ -201,7 +197,7 @@ func syncToFirebaseOptimized(client *firestore.Client, assigned model.Assigned, 
 		default:
 		}
 
-		_, err := client.Doc(docPath).Set(ctx, firestoreData)
+		_, err := client.Collection("Assigned").Doc(strconv.Itoa(assigned.AssID)).Set(ctx, firestoreData)
 		if err == nil {
 			return // Success
 		}

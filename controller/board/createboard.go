@@ -2,11 +2,13 @@ package board
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -75,6 +77,7 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 		return
 	}
 
+	var deepLink string
 	if board.Is_group == "1" {
 		boardUser := model.BoardUser{
 			BoardID: newBoard.BoardID,
@@ -87,6 +90,35 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create board user: " + err.Error()})
 			return
 		}
+
+		// สร้างเวลาหมดอายุ (เช่น 7 วันจากตอนนี้)
+		expireAt := time.Now().Add(7 * 24 * time.Hour)
+
+		// สร้าง URL parameters
+		params := url.Values{}
+		params.Add("boardId", strconv.Itoa(newBoard.BoardID))
+		params.Add("expire", strconv.FormatInt(expireAt.Unix(), 10))
+
+		paramsString := params.Encode()
+
+		// Method 1: ใช้ base64 encoding
+		encodedParams := base64.URLEncoding.EncodeToString([]byte(paramsString))
+
+		// บันทึก share token ลง database
+		shareToken := model.BoardToken{
+			BoardID:   newBoard.BoardID,
+			Token:     encodedParams,
+			ExpiresAt: expireAt,
+			CreateAt:  time.Now(),
+		}
+
+		if err := tx.Create(&shareToken).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create share token: " + err.Error()})
+			return
+		}
+
+		deepLink = encodedParams
 	}
 
 	if err := tx.Commit().Error; err != nil {
@@ -118,8 +150,7 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 			"Type":      groupType,
 		}
 
-		mainDoc := firestoreClient.Collection("Boards").Doc(user.Email)
-		boardDoc := mainDoc.Collection("Boards").Doc(strconv.Itoa(newBoard.BoardID))
+		boardDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(newBoard.BoardID))
 		_, err := boardDoc.Set(ctx, boardDataFirebase)
 		errChan <- err
 	}()
@@ -127,20 +158,26 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	// รอผลลัพธ์จาก Firebase
 	firestoreErr := <-errChan
 
+	// สร้าง response object
+	response := gin.H{
+		"message": "Board created successfully",
+		"boardID": newBoard.BoardID,
+	}
+
+	// เพิ่ม deep_link ถ้าเป็น group board
+	if board.Is_group == "1" && deepLink != "" {
+		response["deep_link"] = deepLink
+	}
+
 	// ตรวจสอบ error จาก Firestore
 	if firestoreErr != nil {
 		// Log error แต่ไม่ fail ทั้งหมด เนื่องจาก PostgreSQL สำเร็จแล้ว
 		fmt.Printf("Firestore error (board created in DB): %v\n", firestoreErr)
-		c.JSON(http.StatusCreated, gin.H{
-			"message": "Board created successfully (with Firestore sync issue)",
-			"boardID": newBoard.BoardID,
-			"warning": "Firestore sync failed but board was created",
-		})
+		response["message"] = "Board created successfully (with Firestore sync issue)"
+		response["warning"] = "Firestore sync failed but board was created"
+		c.JSON(http.StatusCreated, response)
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "Board created successfully",
-		"boardID": newBoard.BoardID,
-	})
+	c.JSON(http.StatusCreated, response)
 }

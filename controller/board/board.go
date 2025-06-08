@@ -1,14 +1,12 @@
 package board
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
-	"strconv"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -56,7 +54,7 @@ func AdjustBoards(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 	ctx := c.Request.Context()
 
 	// สร้าง reference ไปยัง board document
-	boardDocRef := firestoreClient.Collection("Boards").Doc(user.Email).Collection("Boards").Doc(adjustData.BoardID)
+	boardDocRef := firestoreClient.Collection("Boards").Doc(adjustData.BoardID)
 
 	// ตรวจสอบว่า board มีอยู่จริงหรือไม่
 	boardDoc, err := boardDocRef.Get(ctx)
@@ -224,59 +222,6 @@ func InviteBoards(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 	if err := tx.Commit().Error; err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction: " + err.Error()})
-		return
-	}
-
-	// Sync to Firestore asynchronously
-	errChan := make(chan error, 1)
-	ctx := context.Background() // Define context properly
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				if err, ok := r.(error); ok {
-					errChan <- err
-				} else {
-					errChan <- fmt.Errorf("panic in Firebase operation: %v", r)
-				}
-			}
-		}()
-
-		boardDataFirebase := map[string]interface{}{
-			"BoardID":   newBoard.BoardID,
-			"BoardName": board.BoardName,
-			"CreatedBy": board.CreatedBy,
-			"CreatedAt": board.CreatedAt,
-			"Type":      "Group",
-		}
-
-		mainDoc := firestoreClient.Collection("Boards").Doc(user.Email)
-		boardDoc := mainDoc.Collection("Boards").Doc(strconv.Itoa(newBoard.BoardID))
-		_, err := boardDoc.Set(ctx, boardDataFirebase)
-		errChan <- err
-	}()
-
-	// Wait for Firestore result with timeout
-	select {
-	case firestoreErr := <-errChan:
-		if firestoreErr != nil {
-			// Log error but don't fail the whole operation since PostgreSQL succeeded
-			fmt.Printf("Firestore error (board invitation created in DB): %v\n", firestoreErr)
-			c.JSON(http.StatusCreated, gin.H{
-				"message": "User invited to board successfully (with Firestore sync issue)",
-				"boardID": newBoard.BoardID,
-				"warning": "Firestore sync failed but invitation was created",
-			})
-			return
-		}
-	case <-time.After(10 * time.Second):
-		// Timeout case
-		fmt.Printf("Firestore sync timeout for board invitation\n")
-		c.JSON(http.StatusCreated, gin.H{
-			"message": "User invited to board successfully (Firestore sync timeout)",
-			"boardID": newBoard.BoardID,
-			"warning": "Firestore sync timed out but invitation was created",
-		})
 		return
 	}
 

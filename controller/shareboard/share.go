@@ -2,9 +2,11 @@ package shareboard
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -19,16 +21,17 @@ func ShareboardController(router *gin.Engine, db *gorm.DB, firestoreClient *fire
 		routes.POST("/create/:boardid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
 			CreateShareboard(c, db, firestoreClient)
 		})
-		// routes.GET("/all", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-		// 	GetAllShareboards(c, db, firestoreClient)
-		// })
-		// routes.GET("/detail/:shareboardId", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-		// 	GetShareboardDetail(c, db, firestoreClient)
-		// })
-		// routes.DELETE("/delete/:shareboardId", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-		// 	DeleteShareboard(c, db, firestoreClient)
-		// })
 	}
+}
+
+// ShareToken struct สำหรับเก็บข้อมูล share token
+type ShareToken struct {
+	ID        uint      `json:"id" gorm:"primaryKey"`
+	BoardID   uint      `json:"board_id"`
+	Token     string    `json:"token" gorm:"uniqueIndex"`
+	ExpireAt  time.Time `json:"expire_at"`
+	CreatedAt time.Time `json:"created_at"`
+	CreatedBy uint      `json:"created_by"`
 }
 
 func CreateShareboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -59,43 +62,106 @@ func CreateShareboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		return
 	}
 
-	// สร้าง token แบบสุ่ม
-	token, err := generateSecureToken(32) // 32 bytes = 64 hex characters
-	if err != nil {
-		c.JSON(500, gin.H{
-			"error": "Failed to generate token",
-		})
-		return
-	}
+	// กำหนด expire time (เช่น 7 วันจากตอนนี้)
+	expireAt := time.Now().Add(7 * 24 * time.Hour)
 
-	// กำหนดเวลาหมดอายุ (7 วันจากตอนนี้)
-	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+	// สร้าง URL parameters
+	params := url.Values{}
+	params.Add("boardId", boardID)
+	params.Add("expire", strconv.FormatInt(expireAt.Unix(), 10))
 
-	// สร้าง BoardToken record
-	boardToken := model.BoardToken{
+	// Encode parameters เป็น string แล้ว encode อีกทีเป็น base64 หรือ hex
+	paramsString := params.Encode()
+
+	// Method 1: ใช้ base64 encoding
+	encodedParams := base64.URLEncoding.EncodeToString([]byte(paramsString))
+
+	// สร้าง deep link URL ตามรูปแบบที่แสดงในภาพ
+	// deepLinkURL := fmt.Sprintf("myapp://mydayplanner-app/source?%s", encodedParams)
+
+	// บันทึก share token ลง database
+	shareToken := model.BoardToken{
 		BoardID:   boardIDInt,
-		Token:     token,
-		ExpiresAt: expiresAt,
+		Token:     encodedParams,
+		ExpiresAt: expireAt,
 		CreateAt:  time.Now(),
 	}
 
-	// บันทึกลงฐานข้อมูล
-	if err := db.Create(&boardToken).Error; err != nil {
+	if err := db.Create(&shareToken).Error; err != nil {
 		c.JSON(500, gin.H{
 			"error": "Failed to create share token",
 		})
 		return
 	}
 
-	// สร้าง URL แชร์พร้อม token
-	shareURL := "https://api-mydayplanner.onrender.com/board/" + boardID + "?token=" + token
+	// Response
+	c.JSON(200, gin.H{
+		"success":     true,
+		"message":     "Share URL created successfully",
+		"deep_link":   encodedParams,
+		"expire_at":   expireAt.Format(time.RFC3339),
+		"expire_unix": expireAt.Unix(),
+		"board_id":    boardIDInt,
+	})
+}
+
+// ฟังก์ชันสำหรับตรวจสอบและใช้ share token
+func JoinSharedBoard(c *gin.Context, db *gorm.DB) {
+	token := c.Query("token")
+	boardIDStr := c.Query("boardId")
+
+	if token == "" || boardIDStr == "" {
+		c.JSON(400, gin.H{
+			"error": "Missing required parameters",
+		})
+		return
+	}
+
+	// ตรวจสอบ share token
+	var shareToken ShareToken
+	if err := db.Where("token = ?", token).First(&shareToken).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(404, gin.H{
+				"error": "Invalid share link",
+			})
+			return
+		}
+		c.JSON(500, gin.H{
+			"error": "Database error",
+		})
+		return
+	}
+
+	// ตรวจสอบว่า token หมดอายุหรือยัง
+	if time.Now().After(shareToken.ExpireAt) {
+		c.JSON(410, gin.H{
+			"error": "Share link has expired",
+		})
+		return
+	}
+
+	// ตรวจสอบว่า boardID ตรงกับ token หรือไม่
+	boardID, _ := strconv.Atoi(boardIDStr)
+	if shareToken.BoardID != uint(boardID) {
+		c.JSON(400, gin.H{
+			"error": "Invalid board ID for this token",
+		})
+		return
+	}
+
+	// ดึงข้อมูล board
+	var board model.Board
+	if err := db.Where("board_id = ?", boardID).First(&board).Error; err != nil {
+		c.JSON(404, gin.H{
+			"error": "Board not found",
+		})
+		return
+	}
 
 	c.JSON(200, gin.H{
-		"message":    "Share link created successfully",
-		"share_url":  shareURL,
-		"token":      token,
-		"expires_at": expiresAt.Format(time.RFC3339),
-		"board_id":   boardIDInt,
+		"success": true,
+		"board":   board,
+		"message": "Successfully joined shared board",
 	})
 }
 

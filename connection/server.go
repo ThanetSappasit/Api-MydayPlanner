@@ -19,8 +19,6 @@ import (
 func StartServer() {
 	router := gin.Default()
 
-	router.Static("/.well-known", "./static/.well-known")
-
 	DB, err := DBConnection()
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
@@ -48,7 +46,7 @@ func StartServer() {
 
 	report.ReportController(router, DB, FB)
 
-	task.TaskController(router, DB, FB)
+	task.FinishTaskController(router, DB, FB)
 	task.CreateTaskController(router, DB, FB)
 	task.UpdateTaskController(router, DB, FB)
 	task.DeleteTaskController(router, DB, FB)
