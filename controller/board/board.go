@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -24,7 +25,13 @@ func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore
 	routes := router.Group("/board", middleware.AccessTokenMiddleware())
 	{
 		routes.POST("/invite", func(c *gin.Context) {
-			InviteBoards(c, db, firestoreClient)
+			InviteBoardFirebase(c, db, firestoreClient)
+		})
+		routes.POST("/accept", func(c *gin.Context) {
+			AcceptInvite(c, db, firestoreClient)
+		})
+		routes.POST("/addboard/:boardId", func(c *gin.Context) {
+			Addboard(c, db, firestoreClient)
 		})
 		routes.PUT("/adjust", func(c *gin.Context) {
 			AdjustBoards(c, db, firestoreClient)
@@ -33,6 +40,15 @@ func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore
 			NewBoardToken(c, db, firestoreClient)
 		})
 	}
+}
+
+type BoardInvite struct {
+	Accept    bool      `firestore:"accept"`
+	BoardID   int       `firestore:"board_id"`
+	CreatedAt time.Time `firestore:"created_at"`
+	InviteID  int       `firestore:"invite_id"`
+	InviterID int       `firestore:"inviter_id"`
+	UpdatedAt time.Time `firestore:"updated_at"`
 }
 
 func AdjustBoards(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -154,35 +170,38 @@ func InviteBoardFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore
 	}
 
 	// Validate input
-	if req.BoardID == "" && req.UserID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "BoardID is required"})
+	if req.BoardID == "" || req.UserID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "BoardID and UserID are required"})
 		return
 	}
 
-	var boardIDInt int
-	_, err := fmt.Sscanf(req.BoardID, "%d", &boardIDInt)
+	// ตรวจสอบว่า userID จาก MustGet มีอยู่ในระบบจริงหรือไม่
+	var inviterUser model.User
+	if err := db.Where("user_id = ?", userID).First(&inviterUser).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Inviter user not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify inviter user"})
+		}
+		return
+	}
+
+	// แปลง BoardID และ UserID จาก string เป็น int
+	boardIDInt, err := strconv.Atoi(req.BoardID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid BoardID format"})
 		return
 	}
 
-	// Get user data
-	var user struct {
-		UserID int
-		Email  string
-	}
-	if err := db.Raw("SELECT user_id, email FROM user WHERE user_id = ?", userID).Scan(&user).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
-		}
+	inviteeUserIDInt, err := strconv.Atoi(req.UserID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid UserID format"})
 		return
 	}
 
-	// Get board data
-	var board model.Board
-	if err := db.Raw("SELECT * FROM board WHERE board_id = ?", boardIDInt).Scan(&board).Error; err != nil {
+	// ตรวจสอบว่า Board มีอยู่ในระบบหรือไม่
+	var board model.BoardUser
+	if err := db.Where("board_id = ?", boardIDInt).First(&board).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Board not found"})
 		} else {
@@ -191,9 +210,20 @@ func InviteBoardFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore
 		return
 	}
 
-	// Check if user is already invited to this board
+	// ตรวจสอบว่า User ที่จะถูกเชิญมีอยู่ในระบบหรือไม่
+	var inviteeUser model.User
+	if err := db.Where("user_id = ?", inviteeUserIDInt).First(&inviteeUser).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Invitee user not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get invitee user data"})
+		}
+		return
+	}
+
+	// ตรวจสอบว่า User ยังไม่ได้เป็นสมาชิกของ Board นี้
 	var existingBoardUser model.BoardUser
-	if err := db.Where("board_id = ? AND user_id = ?", boardIDInt, user.UserID).First(&existingBoardUser).Error; err == nil {
+	if err := db.Where("board_id = ? AND user_id = ?", boardIDInt, inviteeUserIDInt).First(&existingBoardUser).Error; err == nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "User is already a member of this board"})
 		return
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -203,7 +233,6 @@ func InviteBoardFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore
 
 	// หา ID ที่ต่อเนื่องที่ว่างอยู่สำหรับ BoardInvite
 	ctx := context.Background()
-	inviteID := ""
 
 	// ดึงข้อมูลทั้งหมดจาก BoardInvite collection
 	docs, err := firestoreClient.Collection("BoardInvite").Documents(ctx).GetAll()
@@ -220,21 +249,19 @@ func InviteBoardFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore
 		}
 	}
 
-	// หา ID ที่ว่างตัวแรก
+	// หา ID ที่ว่างตัวแรก (เริ่มจาก 1)
 	nextID := 1
 	for usedIDs[nextID] {
 		nextID++
 	}
-	inviteID = strconv.Itoa(nextID)
+	inviteID := strconv.Itoa(nextID)
 
 	// สร้างข้อมูลสำหรับบันทึกลง Firebase
 	inviteData := map[string]interface{}{
-		"id":         nextID,
-		"user_id":    user.UserID,
+		"inviter_id": int(userID),      // ผู้เชิญ
+		"invite_id":  inviteeUserIDInt, // ผู้ถูกเชิญ
 		"board_id":   boardIDInt,
 		"accept":     false, // ค่าเริ่มต้นเป็น false
-		"email":      user.Email,
-		"board_name": board.BoardName, // เพิ่มชื่อ board เพื่อใช้งานง่าย
 		"created_at": time.Now(),
 		"updated_at": time.Now(),
 	}
@@ -248,41 +275,22 @@ func InviteBoardFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore
 
 	// ส่งผลลัพธ์กลับ
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Board invitation sent successfully",
-		"data": gin.H{
-			"invite_id":  nextID,
-			"user_id":    user.UserID,
-			"board_id":   boardIDInt,
-			"email":      user.Email,
-			"accept":     false,
-			"created_at": time.Now(),
-		},
+		"message":   "Board invitation sent successfully",
+		"invite_id": nextID,
 	})
 }
 
-func InviteBoards(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+func AcceptInvite(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userID := c.MustGet("userId").(uint)
-	var req dto.InviteBoardRequest
+	var req dto.AcceptBoardRequest
+
+	// Bind JSON request
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
 		return
 	}
 
-	// Validate input
-	if req.BoardID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "BoardID is required"})
-		return
-	}
-
-	// Convert BoardID from string to int early for validation
-	var boardIDInt int
-	_, err := fmt.Sscanf(req.BoardID, "%d", &boardIDInt)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid BoardID format"})
-		return
-	}
-
-	// Get user data
+	// Get user data และตรวจสอบว่า user มีอยู่ในระบบหรือไม่
 	var user struct {
 		UserID int
 		Email  string
@@ -296,61 +304,73 @@ func InviteBoards(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 		return
 	}
 
-	// Get board data
-	var board model.Board
-	if err := db.Raw("SELECT * FROM board WHERE board_id = ?", boardIDInt).Scan(&board).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Board not found"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get board data"})
-		}
+	// ดึงข้อมูลจาก Firebase Firestore
+	ctx := context.Background()
+	docRef := firestoreClient.Collection("BoardInvite").Doc(req.InviteID)
+	docSnapshot, err := docRef.Get(ctx)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invite not found"})
 		return
 	}
 
-	// Check if user is already invited to this board
-	var existingBoardUser model.BoardUser
-	if err := db.Where("board_id = ? AND user_id = ?", boardIDInt, user.UserID).First(&existingBoardUser).Error; err == nil {
+	var invite BoardInvite
+	if err := docSnapshot.DataTo(&invite); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse invite data"})
+		return
+	}
+
+	// ตรวจสอบว่า invitation นี้เป็นของ user นี้หรือไม่ (optional security check)
+	if invite.InviterID == int(userID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot accept your own invitation"})
+		return
+	}
+
+	// ตรวจสอบการตอบรับ
+	if !req.Accept {
+		// หาก Accept เป็น false ให้ลบ document ออกจาก Firestore
+		if _, err := docRef.Delete(ctx); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete invitation"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Invitation declined and removed"})
+		return
+	}
+
+	// หาก Accept เป็น true
+	// 1. อัปเดต accept เป็น true ใน Firestore
+	if _, err := docRef.Update(ctx, []firestore.Update{
+		{Path: "accept", Value: true},
+		{Path: "updated_at", Value: time.Now()},
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update invitation"})
+		return
+	}
+
+	// 2. ตรวจสอบว่า user นี้เป็นสมาชิกของ board นี้แล้วหรือยัง
+	var existingBoardUser int64
+	db.Model(&model.BoardUser{}).Where("board_id = ? AND user_id = ?", invite.BoardID, userID).Count(&existingBoardUser)
+
+	if existingBoardUser > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "User is already a member of this board"})
 		return
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing board membership"})
-		return
 	}
 
-	// Create new board user relationship
-	newBoard := model.BoardUser{
-		BoardID: boardIDInt,
-		UserID:  user.UserID,
+	// 3. บันทึกข้อมูลลงใน SQL database
+	boardUser := model.BoardUser{
+		BoardID: invite.BoardID,
+		UserID:  int(userID),
 		AddedAt: time.Now(),
 	}
 
-	// Start database transaction
-	tx := db.Begin()
-	if tx.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database transaction error"})
-		return
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	if err := tx.Create(&newBoard).Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to invite user to board: " + err.Error()})
+	if err := db.Create(&boardUser).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add user to board"})
 		return
 	}
 
-	if err := tx.Commit().Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction: " + err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "User invited to board successfully",
-		"boardID": newBoard.BoardID,
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Invitation accepted successfully",
+		"board_user_id": boardUser.BoardUserID,
+		"board_id":      boardUser.BoardID,
 	})
 }
 
@@ -469,5 +489,49 @@ func NewBoardToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 			"token":      existingToken.Token,
 			"is_expired": true,
 		},
+	})
+}
+
+func Addboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userID := c.MustGet("userId").(uint)
+	boardID := c.Param("boardId")
+
+	var user struct {
+		UserID int
+		Email  string
+	}
+	if err := db.Raw("SELECT user_id, email FROM user WHERE user_id = ?", userID).Scan(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
+		return
+	}
+
+	// Convert boardID from string to int
+	boardIDInt, err := strconv.Atoi(boardID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid board ID"})
+		return
+	}
+
+	// Create BoardUser record
+	boardUser := model.BoardUser{
+		BoardID: boardIDInt,
+		UserID:  user.UserID,
+	}
+
+	// Insert into database
+	if err := db.Create(&boardUser).Error; err != nil {
+		// Check if it's a duplicate entry error
+		if strings.Contains(err.Error(), "Duplicate entry") || strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			c.JSON(http.StatusConflict, gin.H{"error": "User is already added to this board"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add user to board"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "User added to board successfully",
+		"board_user_id": boardUser.BoardUserID,
+		"board_id":      boardUser.BoardID,
 	})
 }
