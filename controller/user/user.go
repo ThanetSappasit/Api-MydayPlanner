@@ -63,7 +63,7 @@ func UpdateProfileUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.C
 	}
 
 	// Single database operation - update directly without SELECT
-	result := db.Model(&model.User{}).Where("id = ?", userId).Updates(updateMap)
+	result := db.Model(&model.User{}).Where("user_id = ?", userId).Updates(updateMap)
 	if result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user profile"})
 		return
@@ -93,11 +93,16 @@ func DeleteUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 	go func() {
 		// More efficient query using COUNT with LIMIT 1
 		const checkSql = `
-			SELECT COUNT(*) > 0 as has_boards FROM (
-				SELECT 1 FROM board WHERE create_by = ? LIMIT 1
-				UNION ALL
-				SELECT 1 FROM board_user WHERE user_id = ? LIMIT 1
-			) as board_check`
+			SELECT 
+				CASE 
+					WHEN creator_count > 0 AND member_count > 0 THEN TRUE
+					ELSE FALSE
+				END AS is_valid
+			FROM (
+				SELECT 
+					(SELECT COUNT(*) FROM board WHERE create_by = ?) AS creator_count,
+					(SELECT COUNT(*) FROM board_user WHERE user_id = ?) AS member_count
+			) AS counts;`
 
 		var hasBoards bool
 		err := db.Raw(checkSql, userId, userId).Scan(&hasBoards).Error
