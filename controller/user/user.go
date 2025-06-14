@@ -88,18 +88,15 @@ func UpdateProfileUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.C
 
 	// Handle password hashing if password is provided
 	if updateProfile.HashedPassword != "" {
-		if updateProfile.HashedPassword == "-" {
-			updateMap["hashed_password"] = "-"
-		} else {
-			// Hash password synchronously (no need for goroutine)
-			hashedPassword, err := bcrypt.GenerateFromPassword([]byte(updateProfile.HashedPassword), bcrypt.DefaultCost)
-			if err != nil {
-				tx.Rollback()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process password"})
-				return
-			}
-			updateMap["hashed_password"] = string(hashedPassword)
+		// Hash password synchronously (no need for goroutine)
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(updateProfile.HashedPassword), bcrypt.DefaultCost)
+		if err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process password"})
+			return
 		}
+		updateMap["hashed_password"] = string(hashedPassword)
+
 	}
 	// Update user profile in transaction
 	result := tx.Model(&model.User{}).Where("user_id = ?", userId).Updates(updateMap)
@@ -210,7 +207,7 @@ func GetAllUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 	c.JSON(200, users)
 }
 
-func ChangedPassword(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+func RemovePassword(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
 
 	var passwordReq dto.PasswordRequest
@@ -220,8 +217,8 @@ func ChangedPassword(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 	}
 
 	// Validate input
-	if passwordReq.OldPassword == "" || passwordReq.NewPassword == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Old password and new password are required"})
+	if passwordReq.OldPassword == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Old password is required"})
 		return
 	}
 
@@ -259,19 +256,35 @@ func ChangedPassword(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 		return
 	}
 
-	// Check if new password is same as old password
-	if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(passwordReq.NewPassword)); err == nil {
-		tx.Rollback()
-		c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be different from current password"})
-		return
-	}
+	var hashedPassword []byte
+	var err error
 
-	// Hash new password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(passwordReq.NewPassword), bcrypt.DefaultCost)
-	if err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process new password"})
-		return
+	// Handle password removal (set to "-") or change
+	if passwordReq.NewPassword == "-" {
+		// Remove password - set to special value
+		hashedPassword = []byte("-")
+	} else {
+		// Validate new password is provided
+		if passwordReq.NewPassword == "" {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "New password is required"})
+			return
+		}
+
+		// Check if new password is same as old password
+		if err := bcrypt.CompareHashAndPassword([]byte(user.HashedPassword), []byte(passwordReq.NewPassword)); err == nil {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be different from current password"})
+			return
+		}
+
+		// Hash new password
+		hashedPassword, err = bcrypt.GenerateFromPassword([]byte(passwordReq.NewPassword), bcrypt.DefaultCost)
+		if err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process new password"})
+			return
+		}
 	}
 
 	// Update password in transaction
@@ -295,6 +308,7 @@ func ChangedPassword(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 		return
 	}
 
+	// Update Firestore if client is available
 	if firestoreClient != nil {
 		ctx := context.Background()
 		_, err := firestoreClient.Collection("usersLogin").Doc(fmt.Sprintf("%s", user.Email)).Update(ctx, []firestore.Update{
@@ -302,11 +316,18 @@ func ChangedPassword(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 		})
 		if err != nil {
 			// Log error but don't fail the request since DB is already updated
-			fmt.Printf("Failed to update Firestore for user %d: %v", userId, err)
+			fmt.Printf("Failed to update Firestore for user %d: %v\n", userId, err)
 		}
 	}
 
+	var message string
+	if passwordReq.NewPassword == "-" {
+		message = "Password removed successfully"
+	} else {
+		message = "Password changed successfully"
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Password changed successfully",
+		"message": message,
 	})
 }

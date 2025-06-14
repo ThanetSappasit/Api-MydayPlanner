@@ -27,8 +27,8 @@ func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 		routes.PUT("/profile", func(c *gin.Context) {
 			user.UpdateProfileUser(c, db, firestoreClient)
 		})
-		routes.PUT("/password", func(c *gin.Context) {
-			user.ChangedPassword(c, db, firestoreClient)
+		routes.PUT("/removepassword", func(c *gin.Context) {
+			user.RemovePassword(c, db, firestoreClient)
 		})
 		routes.DELETE("/account", func(c *gin.Context) {
 			user.DeleteUser(c, db, firestoreClient)
