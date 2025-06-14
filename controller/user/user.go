@@ -7,6 +7,7 @@ import (
 	"mydayplanner/dto"
 	"mydayplanner/model"
 	"net/http"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -20,13 +21,57 @@ func UpdateProfileUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.C
 
 	var updateProfile dto.UpdateProfileRequest
 	if err := c.ShouldBindJSON(&updateProfile); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
 		return
 	}
 
 	// Validate if there's anything to update
 	if updateProfile.Name == "" && updateProfile.HashedPassword == "" && updateProfile.Profile == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No data to update"})
+		return
+	}
+
+	// Validate input data
+	if updateProfile.Name != "" {
+		updateProfile.Name = strings.TrimSpace(updateProfile.Name)
+		if len(updateProfile.Name) < 2 || len(updateProfile.Name) > 100 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Name must be between 2 and 100 characters"})
+			return
+		}
+	}
+
+	if updateProfile.Profile != "" {
+		updateProfile.Profile = strings.TrimSpace(updateProfile.Profile)
+		if len(updateProfile.Profile) > 500 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Profile description must not exceed 500 characters"})
+			return
+		}
+	}
+
+	// Start database transaction
+	tx := db.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+
+	// Ensure rollback on any error
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		}
+	}()
+
+	// Check if user exists before updating
+	var existingUser model.User
+	if err := tx.Table("user").Select("user_id, name").Where("user_id = ?", userId).First(&existingUser).Error; err != nil {
+		tx.Rollback()
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		}
 		return
 	}
 
@@ -41,45 +86,49 @@ func UpdateProfileUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.C
 		updateMap["profile"] = updateProfile.Profile
 	}
 
-	// Handle password hashing concurrently if password is provided
+	// Handle password hashing if password is provided
 	if updateProfile.HashedPassword != "" {
-		// Use channel for concurrent password hashing
-		hashChan := make(chan struct {
-			hashedPassword string
-			err            error
-		}, 1)
-
-		go func() {
+		if updateProfile.HashedPassword == "-" {
+			updateMap["hashed_password"] = "-"
+		} else {
+			// Hash password synchronously (no need for goroutine)
 			hashedPassword, err := bcrypt.GenerateFromPassword([]byte(updateProfile.HashedPassword), bcrypt.DefaultCost)
-			hashChan <- struct {
-				hashedPassword string
-				err            error
-			}{string(hashedPassword), err}
-		}()
-
-		// Get result from goroutine
-		hashResult := <-hashChan
-		if hashResult.err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
-			return
+			if err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process password"})
+				return
+			}
+			updateMap["hashed_password"] = string(hashedPassword)
 		}
-		updateMap["hashed_password"] = hashResult.hashedPassword
 	}
-
-	// Single database operation - update directly without SELECT
-	result := db.Model(&model.User{}).Where("user_id = ?", userId).Updates(updateMap)
+	// Update user profile in transaction
+	result := tx.Model(&model.User{}).Where("user_id = ?", userId).Updates(updateMap)
 	if result.Error != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user profile"})
 		return
 	}
 
-	// Check if any rows were affected (user exists)
+	// Check if any rows were affected
 	if result.RowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		tx.Rollback()
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found or no changes made"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Profile updated successfully"})
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save changes"})
+		return
+	}
+
+	// Prepare response data (without sensitive information)
+	responseData := gin.H{
+		"message": "Profile updated successfully",
+	}
+
+	c.JSON(http.StatusOK, responseData)
 }
 
 func DeleteUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
