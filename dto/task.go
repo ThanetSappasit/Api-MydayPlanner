@@ -1,18 +1,25 @@
 package dto
 
 type CreateTaskRequest struct {
-	BoardID     int    `json:"board_id" binding:"required"`
-	TaskName    string `json:"task_name" binding:"required"`
-	Description string `json:"description"`
-	Status      string `json:"status" binding:"required"`
-	Priority    string `json:"priority"`
+	BoardID     int       `json:"board_id" binding:"required"`
+	TaskName    string    `json:"task_name" binding:"required"`
+	Description string    `json:"description"`
+	Status      string    `json:"status" binding:"required"`
+	Reminder    *Reminder `json:"reminder"`
+	Priority    string    `json:"priority"`
 }
 
 type CreateTodayTaskRequest struct {
-	TaskName    string  `json:"task_name" binding:"required"`
-	Description *string `json:"description,omitempty"`
-	Priority    *string `json:"priority,omitempty"`
-	Status      string  `json:"status" binding:"required"`
+	TaskName    string    `json:"task_name" binding:"required"`
+	Description string    `json:"description"`
+	Status      string    `json:"status" binding:"required"`
+	Reminder    *Reminder `json:"reminder"`
+	Priority    string    `json:"priority"`
+}
+
+type Reminder struct {
+	DueDate          string `json:"due_date" binding:"required"`
+	RecurringPattern string `json:"recurring_pattern,omitempty"`
 }
 
 type DataTodayTaskByNameRequest struct {

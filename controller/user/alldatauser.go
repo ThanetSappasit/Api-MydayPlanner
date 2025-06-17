@@ -1,11 +1,9 @@
 package user
 
 import (
-	"context"
 	"fmt"
 	"mydayplanner/model"
 	"net/http"
-	"sort"
 	"sync"
 	"time"
 
@@ -20,9 +18,10 @@ type BatchResult struct {
 }
 
 type TaskRelatedData struct {
-	Checklists  []model.Checklist
-	Attachments []model.Attachment
-	Assigned    []struct {
+	Checklists    []model.Checklist
+	Attachments   []model.Attachment
+	Notifications []model.Notification
+	Assigned      []struct {
 		model.Assigned
 		UserName string `gorm:"column:user_name"`
 		Email    string `gorm:"column:email"`
@@ -37,11 +36,9 @@ func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	boardChan := make(chan []map[string]interface{}, 1)
 	boardGroupChan := make(chan []map[string]interface{}, 1)
 	tasksChan := make(chan []map[string]interface{}, 1)
-	todayTasksChan := make(chan []map[string]interface{}, 1)
 	errorChan := make(chan error, 5)
 
 	var wg sync.WaitGroup
-	ctx := c.Request.Context()
 
 	// 1. Fetch user data
 	wg.Add(1)
@@ -113,7 +110,7 @@ func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	wg2.Add(1)
 	go func() {
 		defer wg2.Done()
-		tasksData, err := fetchTasksDataOptimized(db, allBoardIDs)
+		tasksData, err := fetchTasksDataOptimized(db, allBoardIDs, userId)
 		if err != nil {
 			select {
 			case errorChan <- fmt.Errorf("failed to get tasks data: %w", err):
@@ -125,24 +122,9 @@ func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 		tasksChan <- tasksData
 	}()
 
-	// 5. Fetch today tasks from Firestore
-	wg2.Add(1)
-	go func() {
-		defer wg2.Done()
-		todayTasks, err := fetchTasks(ctx, firestoreClient, userData["Email"].(string))
-		if err != nil {
-			select {
-			case errorChan <- fmt.Errorf("failed to fetch today tasks: %w", err):
-			default:
-			}
-			return
-		}
-		todayTasksChan <- todayTasks
-	}()
-
 	wg2.Wait()
 
-	// ตรวจสอบ error อีกครั้ง
+	// ตรวจสอบ error จาก task fetching
 	select {
 	case err := <-errorChan:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -151,17 +133,12 @@ func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	}
 
 	tasks := <-tasksChan
-	todayTasks := <-todayTasksChan
-
-	// Sort today tasks
-	sortTasksByCreatedAt(todayTasks)
 
 	c.JSON(http.StatusOK, gin.H{
 		"user":       userData,
 		"board":      boardData,
 		"boardgroup": boardGroupData,
 		"tasks":      tasks,
-		"todaytasks": todayTasks,
 	})
 }
 
@@ -281,7 +258,6 @@ func fetchBoardGroupData(db *gorm.DB, userId uint) ([]map[string]interface{}, er
 	return boardgroup, nil
 }
 
-// แก้ไขฟังก์ชันนี้ - เปลี่ยนจาก int เป็น uint
 func extractBoardIDs(boardData, boardGroupData []map[string]interface{}) []uint {
 	allBoardIDs := make([]uint, 0, len(boardData)+len(boardGroupData))
 
@@ -299,19 +275,37 @@ func extractBoardIDs(boardData, boardGroupData []map[string]interface{}) []uint 
 	return allBoardIDs
 }
 
-// แก้ไขฟังก์ชันนี้ - เปลี่ยน parameter type จาก []int เป็น []uint
-func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint) ([]map[string]interface{}, error) {
-	if len(allBoardIDs) == 0 {
-		return make([]map[string]interface{}, 0), nil
+// Updated function to include user tasks and handle null board_id
+func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint, userId uint) ([]map[string]interface{}, error) {
+	// Fetch tasks from boards + tasks with null board_id created by user
+	var tasksData []struct {
+		TaskID      int       `gorm:"column:task_id"`
+		BoardID     *int      `gorm:"column:board_id"`
+		TaskName    string    `gorm:"column:task_name"`
+		Description *string   `gorm:"column:description"`
+		Status      string    `gorm:"column:status"`
+		Priority    *string   `gorm:"column:priority"`
+		CreateBy    *int      `gorm:"column:create_by"`
+		CreateAt    time.Time `gorm:"column:create_at"`
 	}
 
-	// Fetch all tasks
-	var tasksData []model.Tasks
-	if err := db.Raw(`SELECT 
-			task_id, board_id, task_name, description, 
-			status, priority, create_by, create_at
-		FROM tasks 
-		WHERE board_id IN (?)`, allBoardIDs).Scan(&tasksData).Error; err != nil {
+	query := `SELECT 
+		task_id, board_id, task_name, description, 
+		status, priority, create_by, create_at
+	FROM tasks 
+	WHERE `
+
+	var args []interface{}
+
+	if len(allBoardIDs) > 0 {
+		query += `(board_id IN (?) OR (board_id IS NULL AND create_by = ?))`
+		args = append(args, allBoardIDs, userId)
+	} else {
+		query += `(board_id IS NULL AND create_by = ?)`
+		args = append(args, userId)
+	}
+
+	if err := db.Raw(query, args...).Scan(&tasksData).Error; err != nil {
 		return nil, fmt.Errorf("failed to fetch tasks: %w", err)
 	}
 
@@ -319,7 +313,7 @@ func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint) ([]map[string]inte
 		return make([]map[string]interface{}, 0), nil
 	}
 
-	// Extract all task IDs - แก้ไขเป็น uint
+	// Extract all task IDs
 	taskIDs := make([]uint, len(tasksData))
 	for i, task := range tasksData {
 		taskIDs[i] = uint(task.TaskID)
@@ -357,23 +351,33 @@ func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint) ([]map[string]inte
 	// Group related data by task ID
 	checklistsByTask := groupChecklistsByTask(relatedData.Checklists)
 	attachmentsByTask := groupAttachmentsByTask(relatedData.Attachments)
+	notificationsByTask := groupNotificationsByTask(relatedData.Notifications)
 	assignedByTask := groupAssignedByTask(relatedData.Assigned)
 
 	// Build result
 	tasks := make([]map[string]interface{}, 0, len(tasksData))
 	for _, task := range tasksData {
+		// Handle null board_id - convert to "Today"
+		var boardDisplay interface{}
+		if task.BoardID == nil {
+			boardDisplay = "Today"
+		} else {
+			boardDisplay = *task.BoardID
+		}
+
 		taskMap := map[string]interface{}{
-			"TaskID":      task.TaskID,
-			"BoardID":     task.BoardID,
-			"TaskName":    task.TaskName,
-			"Description": task.Description,
-			"Status":      task.Status,
-			"Priority":    task.Priority,
-			"CreateBy":    task.CreateBy,
-			"CreatedAt":   task.CreateAt,
-			"Checklists":  buildChecklistsMap(checklistsByTask[task.TaskID]),
-			"Attachments": buildAttachmentsMap(attachmentsByTask[task.TaskID]),
-			"Assigned":    buildAssignedMap(assignedByTask[task.TaskID]),
+			"TaskID":        task.TaskID,
+			"BoardID":       boardDisplay, // This will be "Today" if board_id is null
+			"TaskName":      task.TaskName,
+			"Description":   task.Description,
+			"Status":        task.Status,
+			"Priority":      task.Priority,
+			"CreateBy":      task.CreateBy,
+			"CreatedAt":     task.CreateAt,
+			"Checklists":    buildChecklistsMap(checklistsByTask[task.TaskID]),
+			"Attachments":   buildAttachmentsMap(attachmentsByTask[task.TaskID]),
+			"Notifications": buildNotificationsMap(notificationsByTask[task.TaskID]),
+			"Assigned":      buildAssignedMap(assignedByTask[task.TaskID]),
 		}
 		tasks = append(tasks, taskMap)
 	}
@@ -381,17 +385,79 @@ func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint) ([]map[string]inte
 	return tasks, nil
 }
 
-// แก้ไขฟังก์ชันนี้ - เปลี่ยน parameter type จาก []int เป็น []uint
+func buildChecklistsMap(checklists []model.Checklist) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(checklists))
+	for _, checklist := range checklists {
+		result = append(result, map[string]interface{}{
+			"ChecklistID":   checklist.ChecklistID,
+			"TaskID":        checklist.TaskID,
+			"ChecklistName": checklist.ChecklistName,
+			"CreatedAt":     checklist.CreateAt,
+		})
+	}
+	return result
+}
+
+func buildAttachmentsMap(attachments []model.Attachment) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(attachments))
+	for _, attachment := range attachments {
+		result = append(result, map[string]interface{}{
+			"AttachmentID": attachment.AttachmentID,
+			"TasksID":      attachment.TasksID,
+			"FileName":     attachment.FileName,
+			"FilePath":     attachment.FilePath,
+			"FileType":     attachment.FileType,
+			"UploadAt":     attachment.UploadAt,
+		})
+	}
+	return result
+}
+
+func buildNotificationsMap(notifications []model.Notification) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(notifications))
+	for _, notification := range notifications {
+		result = append(result, map[string]interface{}{
+			"NotificationID":   notification.NotificationID,
+			"TaskID":           notification.TaskID,
+			"DueDate":          notification.DueDate,
+			"RecurringPattern": notification.RecurringPattern,
+			"IsSend":           notification.IsSend,
+			"CreatedAt":        notification.CreatedAt,
+		})
+	}
+	return result
+}
+
+func buildAssignedMap(assigned []struct {
+	model.Assigned
+	UserName string `gorm:"column:user_name"`
+	Email    string `gorm:"column:email"`
+}) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(assigned))
+	for _, assign := range assigned {
+		result = append(result, map[string]interface{}{
+			"AssID":    assign.AssID,
+			"TaskID":   assign.TaskID,
+			"UserID":   assign.UserID,
+			"AssignAt": assign.AssignAt,
+			"UserName": assign.UserName,
+			"Email":    assign.Email,
+		})
+	}
+	return result
+}
+
 func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 	var wg sync.WaitGroup
 	var checklists []model.Checklist
 	var attachments []model.Attachment
+	var notifications []model.Notification
 	var assigned []struct {
 		model.Assigned
 		UserName string `gorm:"column:user_name"`
 		Email    string `gorm:"column:email"`
 	}
-	errorChan := make(chan error, 3)
+	errorChan := make(chan error, 4)
 
 	// Fetch checklists
 	wg.Add(1)
@@ -425,6 +491,22 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 		attachments = attachmentsData
 	}()
 
+	// Fetch notifications
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var notificationsData []model.Notification
+		if err := db.Raw(`SELECT notification_id, task_id, due_date, recurring_pattern, is_send, created_at 
+			FROM notification WHERE task_id IN (?)`, taskIDs).Scan(&notificationsData).Error; err != nil {
+			select {
+			case errorChan <- fmt.Errorf("failed to fetch notifications: %w", err):
+			default:
+			}
+			return
+		}
+		notifications = notificationsData
+	}()
+
 	// Fetch assigned users
 	wg.Add(1)
 	go func() {
@@ -456,9 +538,10 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 	}
 
 	return TaskRelatedData{
-		Checklists:  checklists,
-		Attachments: attachments,
-		Assigned:    assigned,
+		Checklists:    checklists,
+		Attachments:   attachments,
+		Notifications: notifications,
+		Assigned:      assigned,
 	}, nil
 }
 
@@ -474,6 +557,14 @@ func groupAttachmentsByTask(attachments []model.Attachment) map[int][]model.Atta
 	result := make(map[int][]model.Attachment)
 	for _, attachment := range attachments {
 		result[attachment.TasksID] = append(result[attachment.TasksID], attachment)
+	}
+	return result
+}
+
+func groupNotificationsByTask(notifications []model.Notification) map[int][]model.Notification {
+	result := make(map[int][]model.Notification)
+	for _, notification := range notifications {
+		result[notification.TaskID] = append(result[notification.TaskID], notification)
 	}
 	return result
 }
@@ -496,211 +587,4 @@ func groupAssignedByTask(assigned []struct {
 		result[assign.TaskID] = append(result[assign.TaskID], assign)
 	}
 	return result
-}
-
-func buildChecklistsMap(checklists []model.Checklist) []map[string]interface{} {
-	result := make([]map[string]interface{}, 0, len(checklists))
-	for _, checklist := range checklists {
-		result = append(result, map[string]interface{}{
-			"ChecklistID":   checklist.ChecklistID,
-			"TaskID":        checklist.TaskID,
-			"ChecklistName": checklist.ChecklistName,
-			"CreatedAt":     checklist.CreateAt,
-		})
-	}
-	return result
-}
-
-func buildAttachmentsMap(attachments []model.Attachment) []map[string]interface{} {
-	result := make([]map[string]interface{}, 0, len(attachments))
-	for _, attachment := range attachments {
-		result = append(result, map[string]interface{}{
-			"AttachmentID": attachment.AttachmentID,
-			"TasksID":      attachment.TasksID,
-			"FileName":     attachment.FileName,
-			"FilePath":     attachment.FilePath,
-			"FileType":     attachment.FileType,
-			"UploadAt":     attachment.UploadAt,
-		})
-	}
-	return result
-}
-
-func buildAssignedMap(assigned []struct {
-	model.Assigned
-	UserName string `gorm:"column:user_name"`
-	Email    string `gorm:"column:email"`
-}) []map[string]interface{} {
-	result := make([]map[string]interface{}, 0, len(assigned))
-	for _, assign := range assigned {
-		result = append(result, map[string]interface{}{
-			"AssID":    assign.AssID,
-			"TaskID":   assign.TaskID,
-			"UserID":   assign.UserID,
-			"AssignAt": assign.AssignAt,
-			"UserName": assign.UserName,
-			"Email":    assign.Email,
-		})
-	}
-	return result
-}
-
-// Firestore functions remain the same but with minor optimizations
-func fetchTasks(ctx context.Context, client *firestore.Client, userEmail string) ([]map[string]interface{}, error) {
-	taskDocs, err := client.Collection("TodayTasks").Doc(userEmail).Collection("tasks").Documents(ctx).GetAll()
-	if err != nil {
-		return make([]map[string]interface{}, 0), nil
-	}
-
-	if len(taskDocs) == 0 {
-		return make([]map[string]interface{}, 0), nil
-	}
-
-	tasks := make([]map[string]interface{}, 0, len(taskDocs))
-	var wg sync.WaitGroup
-	tasksChan := make(chan map[string]interface{}, len(taskDocs))
-
-	// Use worker pool to limit goroutines
-	workerCount := 10
-	if len(taskDocs) < workerCount {
-		workerCount = len(taskDocs)
-	}
-
-	taskQueue := make(chan *firestore.DocumentSnapshot, len(taskDocs))
-
-	// Start workers
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for doc := range taskQueue {
-				taskData := processTaskDocument(ctx, client, userEmail, doc)
-				tasksChan <- taskData
-			}
-		}()
-	}
-
-	// Send tasks to queue
-	for _, doc := range taskDocs {
-		taskQueue <- doc
-	}
-	close(taskQueue)
-
-	wg.Wait()
-	close(tasksChan)
-
-	for task := range tasksChan {
-		tasks = append(tasks, task)
-	}
-
-	return tasks, nil
-}
-
-func processTaskDocument(ctx context.Context, client *firestore.Client, userEmail string, doc *firestore.DocumentSnapshot) map[string]interface{} {
-	taskData := doc.Data()
-	taskID := doc.Ref.ID
-
-	// Fetch subcollections concurrently
-	var wg sync.WaitGroup
-	attachmentsChan := make(chan []map[string]interface{}, 1)
-	checklistsChan := make(chan []map[string]interface{}, 1)
-
-	wg.Add(2)
-
-	// Attachments
-	go func() {
-		defer wg.Done()
-		items := getSubcollectionOptimized(ctx, client, fmt.Sprintf("TodayTasks/%s/tasks/%s/Attachments", userEmail, taskID))
-		attachmentsChan <- items
-	}()
-
-	// Checklists
-	go func() {
-		defer wg.Done()
-		items := getSubcollectionOptimized(ctx, client, fmt.Sprintf("TodayTasks/%s/tasks/%s/Checklists", userEmail, taskID))
-		checklistsChan <- items
-	}()
-
-	wg.Wait()
-
-	taskData["Attachments"] = <-attachmentsChan
-	taskData["Checklists"] = <-checklistsChan
-
-	return taskData
-}
-
-func getSubcollectionOptimized(ctx context.Context, client *firestore.Client, collectionPath string) []map[string]interface{} {
-	docs, err := client.Collection(collectionPath).Documents(ctx).GetAll()
-	if err != nil {
-		return make([]map[string]interface{}, 0)
-	}
-
-	if len(docs) == 0 {
-		return make([]map[string]interface{}, 0)
-	}
-
-	items := make([]map[string]interface{}, 0, len(docs))
-	for _, d := range docs {
-		items = append(items, d.Data())
-	}
-	return items
-}
-
-func sortTasksByCreatedAt(tasks []map[string]interface{}) {
-	sort.Slice(tasks, func(i, j int) bool {
-		timeI := getTimeFromInterface(tasks[i]["CreatedAt"])
-		timeJ := getTimeFromInterface(tasks[j]["CreatedAt"])
-		return timeI.Before(timeJ)
-	})
-
-	// Sort subcollections in each task
-	for _, task := range tasks {
-		if attachments, ok := task["Attachments"].([]map[string]interface{}); ok {
-			sortAttachments(attachments)
-		}
-		if checklists, ok := task["Checklists"].([]map[string]interface{}); ok {
-			sortChecklists(checklists)
-		}
-		if assigned, ok := task["Assigned"].([]map[string]interface{}); ok {
-			sortAssigned(assigned)
-		}
-	}
-}
-
-func getTimeFromInterface(timeInterface interface{}) time.Time {
-	switch t := timeInterface.(type) {
-	case time.Time:
-		return t
-	case string:
-		if parsedTime, err := time.Parse(time.RFC3339, t); err == nil {
-			return parsedTime
-		}
-		return time.Time{}
-	default:
-		return time.Time{}
-	}
-}
-
-func sortAttachments(attachments []map[string]interface{}) {
-	sort.Slice(attachments, func(i, j int) bool {
-		timeI := getTimeFromInterface(attachments[i]["UploadAt"])
-		timeJ := getTimeFromInterface(attachments[j]["UploadAt"])
-		return timeI.Before(timeJ)
-	})
-}
-
-func sortChecklists(checklists []map[string]interface{}) {
-	sort.Slice(checklists, func(i, j int) bool {
-		timeI := getTimeFromInterface(checklists[i]["CreatedAt"])
-		timeJ := getTimeFromInterface(checklists[j]["CreatedAt"])
-		return timeI.Before(timeJ)
-	})
-}
-
-func sortAssigned(assigned []map[string]interface{}) {
-	sort.Slice(assigned, func(i, j int) bool {
-		timeI := getTimeFromInterface(assigned[i]["AssignAt"])
-		timeJ := getTimeFromInterface(assigned[j]["AssignAt"])
-		return timeI.Before(timeJ)
-	})
 }

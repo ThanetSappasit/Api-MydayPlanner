@@ -2,13 +2,11 @@ package todaytasks
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
-	"strconv"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -325,97 +323,97 @@ func UpdateTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 
 func CreateTodayTaskFirebase(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
-	var req dto.CreateTodayTaskRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+	var task dto.CreateTodayTaskRequest
+	if err := c.ShouldBindJSON(&task); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input", "details": err.Error()})
 		return
 	}
 
 	var user model.User
-	if err := db.Raw("SELECT user_id, email FROM user WHERE user_id = ?", userId).Scan(&user).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
+	if err := db.Where("user_id = ?", userId).First(&user).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
-	// ดึงข้อมูล taskID ทั้งหมดที่มีอยู่
-	tasksIter := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Documents(c)
-	defer tasksIter.Stop()
+	tx := db.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
 
-	existingTaskIDs := make(map[int]bool)
-	maxTaskID := 0
-
-	for {
-		doc, err := tasksIter.Next()
-		if err == iterator.Done {
-			break
+	// Helper function สำหรับแปลง string เป็น pointer
+	stringPtr := func(s string) *string {
+		if s == "" {
+			return nil
 		}
+		return &s
+	}
+
+	intPtr := func(i int) *int {
+		return &i
+	}
+
+	newTask := model.Tasks{
+		BoardID:     nil, // ตั้งค่าเป็น nil เพื่อรองรับ board null
+		TaskName:    task.TaskName,
+		Description: stringPtr(task.Description), // แปลงเป็น pointer
+		Status:      task.Status,
+		Priority:    stringPtr(task.Priority), // แปลงเป็น pointer
+		CreateBy:    intPtr(user.UserID),      // แปลงเป็น pointer
+		CreateAt:    time.Now(),
+	}
+
+	if err := tx.Create(&newTask).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create task"})
+		return
+	}
+
+	// Handle reminders
+	if task.Reminder != nil {
+		// รองรับรูปแบบวันที่ที่คุณส่งมา: 2025-06-20 09:53:09.638825
+		parsedDueDate, err := time.Parse("2006-01-02 15:04:05.999999", task.Reminder.DueDate)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch existing tasks"})
-			return
-		}
-
-		// แปลง taskID จาก string เป็น int
-		if taskIDStr, ok := doc.Data()["TaskID"].(string); ok {
-			if taskIDInt, parseErr := strconv.Atoi(taskIDStr); parseErr == nil {
-				existingTaskIDs[taskIDInt] = true
-				if taskIDInt > maxTaskID {
-					maxTaskID = taskIDInt
+			// ถ้า parse ไม่ได้ ลองรูปแบบอื่น
+			parsedDueDate, err = time.Parse("2006-01-02 15:04:05", task.Reminder.DueDate)
+			if err != nil {
+				// ถ้ายังไม่ได้ ลอง RFC3339
+				parsedDueDate, err = time.Parse(time.RFC3339, task.Reminder.DueDate)
+				if err != nil {
+					tx.Rollback()
+					c.JSON(http.StatusBadRequest, gin.H{
+						"error": "Invalid DueDate format. Supported formats: '2006-01-02 15:04:05.999999', '2006-01-02 15:04:05', or RFC3339",
+					})
+					return
 				}
 			}
 		}
-	}
 
-	// หา taskID ที่ว่างที่เล็กที่สุด
-	var newTaskID int
-	found := false
+		notification := model.Notification{
+			TaskID:           newTask.TaskID,
+			DueDate:          parsedDueDate,
+			RecurringPattern: task.Reminder.RecurringPattern,
+			IsSend:           false,
+			CreatedAt:        time.Now(),
+		}
 
-	// ตรวจสอบจาก 1 ไปจนถึง maxTaskID เพื่อหาช่องว่าง
-	for i := 1; i <= maxTaskID; i++ {
-		if !existingTaskIDs[i] {
-			newTaskID = i
-			found = true
-			break
+		// บันทึก notification ลงฐานข้อมูล
+		if err := tx.Create(&notification).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create notification"})
+			return
 		}
 	}
 
-	// หากไม่มีช่องว่าง ให้ใช้เลขถัดไป
-	if !found {
-		newTaskID = maxTaskID + 1
-	}
-
-	taskID := fmt.Sprintf("%d", newTaskID)
-
-	taskData := map[string]interface{}{
-		"TaskID":    taskID,
-		"TaskName":  req.TaskName,
-		"CreatedBy": user.UserID,
-		"CreatedAt": time.Now(),
-		"Status":    req.Status,
-		"Archived":  false,
-	}
-
-	// ตรวจสอบและเพิ่ม description (รองรับทั้งกรณี nil และ empty string)
-	if req.Description != nil {
-		taskData["Description"] = *req.Description
-	} else {
-		taskData["Description"] = ""
-	}
-
-	// ตรวจสอบและเพิ่ม priority (รองรับทั้งกรณี nil และ empty string)
-	if req.Priority != nil {
-		taskData["Priority"] = *req.Priority
-	} else {
-		taskData["Priority"] = ""
-	}
-
-	_, err := firestoreClient.Collection("TodayTasks").Doc(user.Email).Collection("tasks").Doc(taskID).Set(c, taskData)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create task in Firestore"})
+	// Commit the transaction
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(http.StatusCreated, gin.H{
 		"message": "Task created successfully",
-		"taskID":  taskID,
+		"taskID":  newTask.TaskID,
 	})
 }
