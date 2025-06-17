@@ -17,6 +17,15 @@ type CreateTodayTaskRequest struct {
 	Priority    string    `json:"priority"`
 }
 
+type CreateAllTaskRequest struct {
+	TaskName    string    `json:"task_name" binding:"required"`
+	Description string    `json:"description"`
+	Status      string    `json:"status" binding:"required"`
+	Reminder    *Reminder `json:"reminder"`
+	Priority    string    `json:"priority"`
+	DayOfWeek   string    `json:"day_of_week" binding:"required"`
+}
+
 type Reminder struct {
 	DueDate          string `json:"due_date" binding:"required"`
 	RecurringPattern string `json:"recurring_pattern,omitempty"`

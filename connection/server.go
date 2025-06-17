@@ -52,6 +52,7 @@ func StartServer() {
 	task.DeleteTaskController(router, DB, FB)
 	todaytasks.TodayTaskController(router, DB, FB)
 	todaytasks.DeleteTodayTaskController(router, DB, FB)
+	task.AllTaskController(router, DB, FB)
 
 	attachments.AttachmentsController(router, DB, FB)
 	shareboard.ShareboardController(router, DB, FB)
