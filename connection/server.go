@@ -10,7 +10,6 @@ import (
 	"mydayplanner/controller/report"
 	"mydayplanner/controller/shareboard"
 	"mydayplanner/controller/task"
-	"mydayplanner/controller/task/todaytasks"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -48,11 +47,8 @@ func StartServer() {
 
 	task.FinishTaskController(router, DB, FB)
 	task.CreateTaskController(router, DB, FB)
-	// task.UpdateTaskController(router, DB, FB)
+	task.UpdateTaskController(router, DB, FB)
 	task.DeleteTaskController(router, DB, FB)
-	todaytasks.TodayTaskController(router, DB, FB)
-	todaytasks.DeleteTodayTaskController(router, DB, FB)
-	task.AllTaskController(router, DB, FB)
 
 	attachments.AttachmentsController(router, DB, FB)
 	shareboard.ShareboardController(router, DB, FB)

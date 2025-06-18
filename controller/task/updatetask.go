@@ -1,12 +1,12 @@
 package task
 
 import (
-	// "fmt"
-	// "mydayplanner/dto"
-	// "mydayplanner/middleware"
-	// "mydayplanner/model"
-	// "net/http"
-	// "strconv"
+	"mydayplanner/dto"
+	"mydayplanner/middleware"
+	"mydayplanner/model"
+	"net/http"
+	"strconv"
+	"strings"
 
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
@@ -14,196 +14,176 @@ import (
 )
 
 func UpdateTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	// router.PUT("/taskadjust", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-	// 	AdjustTask(c, db, firestoreClient)
-	// })
+	router.PUT("/updatetask/:taskid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+		AdjustTask(c, db, firestoreClient)
+	})
 }
 
-// func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-// 	userID := c.MustGet("userId").(uint)
+func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+	taskIDStr := c.Param("taskid")
+	if taskIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Task ID is required"})
+		return
+	}
 
-// 	var adjustData dto.AdjustTaskRequest
-// 	if err := c.ShouldBindJSON(&adjustData); err != nil {
-// 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
-// 		return
-// 	}
+	// แปลง string ID เป็น int
+	taskID, err := strconv.Atoi(taskIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
 
-// 	// ตรวจสอบว่ามี required fields
-// 	if adjustData.BoardID == 0 {
-// 		c.JSON(http.StatusBadRequest, gin.H{"error": "board_id is required"})
-// 		return
-// 	}
+	var taskreq dto.AdjustTaskRequest
+	if err := c.ShouldBindJSON(&taskreq); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input", "details": err.Error()})
+		return
+	}
 
-// 	if adjustData.TaskID == 0 {
-// 		c.JSON(http.StatusBadRequest, gin.H{"error": "task_id is required"})
-// 		return
-// 	}
+	// ดึงข้อมูล task
+	var task struct {
+		TaskID   int  `db:"task_id"`
+		BoardID  *int `db:"board_id"`
+		CreateBy *int `db:"create_by"`
+	}
 
-// 	taskIDInt := adjustData.TaskID
-// 	boardIDInt := adjustData.BoardID
+	if err := db.Table("tasks").
+		Select("task_id, board_id, create_by").
+		Where("task_id = ?", taskID).
+		First(&task).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch task"})
+		}
+		return
+	}
 
-// 	var user struct {
-// 		UserID int
-// 		Email  string
-// 	}
-// 	if err := db.Raw("SELECT user_id, email FROM user WHERE user_id = ?", userID).Scan(&user).Error; err != nil {
-// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
-// 		return
-// 	}
+	// ตรวจสอบสิทธิ์
+	canUpdate := false
 
-// 	ctx := c.Request.Context()
+	if task.BoardID == nil {
+		// Task ไม่มี board_id - ตรวจสอบ create_by
+		if task.CreateBy != nil && *task.CreateBy == int(userId) {
+			canUpdate = true
+		}
+	} else {
+		// Task มี board_id - ตรวจสอบสิทธิ์แบบ 2 เงื่อนไข
+		// 1. ถ้าเป็นคนสร้าง task (create_by = user_id)
+		if task.CreateBy != nil && *task.CreateBy == int(userId) {
+			canUpdate = true
+		} else {
+			// 2. ถ้าเป็นสมาชิกของ board (ผ่าน board_user)
+			var count int64
+			query := `
+				SELECT COUNT(1)
+				FROM tasks t
+				JOIN board_user bu ON t.board_id = bu.board_id
+				WHERE t.task_id = ? AND bu.user_id = ?
+			`
 
-// 	// ดึงข้อมูล task เดิมจาก database
-// 	var currentTask model.Tasks
-// 	if err := db.Where("task_id = ? AND board_id = ?", taskIDInt, boardIDInt).First(&currentTask).Error; err != nil {
-// 		if err == gorm.ErrRecordNotFound {
-// 			c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
-// 			return
-// 		}
-// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get task data"})
-// 		return
-// 	}
+			if err := db.Raw(query, taskID, userId).Count(&count).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
+				return
+			}
 
-// 	// ตรวจสอบว่า user เป็นสมาชิกของ board หรือไม่
-// 	var count int64
-// 	if err := db.Table("board_user").
-// 		Where("board_id = ? AND user_id = ?", boardIDInt, userID).
-// 		Count(&count).Error; err != nil {
-// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check board membership"})
-// 		return
-// 	}
-// 	if count == 0 {
-// 		c.JSON(http.StatusForbidden, gin.H{"error": "You are not a member of this board"})
-// 		return
-// 	}
+			if count > 0 {
+				canUpdate = true
+			}
+		}
+	}
 
-// 	// เตรียมข้อมูลสำหรับอัปเดต
-// 	updateData := make(map[string]interface{})
-// 	firestoreUpdates := []firestore.Update{}
+	if !canUpdate {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		return
+	}
 
-// 	// ตรวจสอบและเตรียมข้อมูลที่จะอัปเดต
-// 	// TaskName - ถ้าไม่ใช่ empty string และต่างจากข้อมูลเดิม
-// 	if adjustData.TaskName != "" && adjustData.TaskName != currentTask.TaskName {
-// 		updateData["task_name"] = adjustData.TaskName
-// 		firestoreUpdates = append(firestoreUpdates, firestore.Update{
-// 			Path:  "TaskName",
-// 			Value: adjustData.TaskName,
-// 		})
-// 	}
+	// เตรียมข้อมูลสำหรับอัปเดท (อัปเดทเฉพาะฟิลด์ที่ส่งมา)
+	updates := make(map[string]interface{})
 
-// 	// Description - ถ้าไม่ใช่ empty string หรือถ้าต่างจากข้อมูลเดิม (รวมถึงการลบ description)
-// 	currentDescription := ""
-// 	if currentTask.Description != nil {
-// 		currentDescription = *currentTask.Description
-// 	}
-// 	if adjustData.Description != currentDescription {
-// 		updateData["description"] = adjustData.Description
-// 		firestoreUpdates = append(firestoreUpdates, firestore.Update{
-// 			Path:  "Description",
-// 			Value: adjustData.Description,
-// 		})
-// 	}
+	// ตรวจสอบและเพิ่มฟิลด์ที่จะอัปเดท
+	if strings.TrimSpace(taskreq.TaskName) != "" {
+		updates["task_name"] = strings.TrimSpace(taskreq.TaskName)
+	}
 
-// 	// Status - ถ้าไม่ใช่ empty string และต่างจากข้อมูลเดิม
-// 	if adjustData.Status != "" {
-// 		// ตรวจสอบว่า status เป็นค่าที่ valid (0, 1, 2)
-// 		if adjustData.Status == "0" || adjustData.Status == "1" || adjustData.Status == "2" {
-// 			if adjustData.Status != currentTask.Status {
-// 				updateData["status"] = adjustData.Status
-// 				firestoreUpdates = append(firestoreUpdates, firestore.Update{
-// 					Path:  "Status",
-// 					Value: adjustData.Status,
-// 				})
-// 			}
-// 		} else {
-// 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid status value. Must be 0, 1, or 2"})
-// 			return
-// 		}
-// 	}
+	if strings.TrimSpace(taskreq.Description) != "" {
+		updates["description"] = strings.TrimSpace(taskreq.Description)
+	}
 
-// 	// Priority - ถ้าไม่ใช่ empty string หรือถ้าต่างจากข้อมูลเดิม (รวมถึงการลบ priority)
-// 	currentPriority := ""
-// 	if currentTask.Priority != nil {
-// 		currentPriority = *currentTask.Priority
-// 	}
-// 	if adjustData.Priority != currentPriority {
-// 		// ตรวจสอบว่า priority เป็นค่าที่ valid (1, 2, 3) หรือ empty
-// 		if adjustData.Priority == "" || adjustData.Priority == "1" || adjustData.Priority == "2" || adjustData.Priority == "3" {
-// 			updateData["priority"] = adjustData.Priority
-// 			firestoreUpdates = append(firestoreUpdates, firestore.Update{
-// 				Path:  "Priority",
-// 				Value: adjustData.Priority,
-// 			})
-// 		} else {
-// 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid priority value. Must be 1, 2, 3, or empty"})
-// 			return
-// 		}
-// 	}
+	if strings.TrimSpace(taskreq.Priority) != "" {
+		priority := strings.TrimSpace(taskreq.Priority)
+		// ตรวจสอบว่า priority ถูกต้องหรือไม่ (1, 2, 3)
+		if priority == "1" || priority == "2" || priority == "3" {
+			updates["priority"] = priority
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Priority must be 1, 2, or 3"})
+			return
+		}
+	}
 
-// 	// ถ้าไม่มีข้อมูลที่ต้องอัปเดต
-// 	if len(updateData) == 0 {
-// 		c.JSON(http.StatusOK, gin.H{
-// 			"message": "No changes detected",
-// 			"task_id": adjustData.TaskID,
-// 		})
-// 		return
-// 	}
+	// ตรวจสอบว่ามีฟิลด์ที่จะอัปเดทหรือไม่
+	if len(updates) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No valid fields to update"})
+		return
+	}
 
-// 	// เริ่ม transaction เพื่ออัปเดตทั้ง SQL และ Firebase
-// 	tx := db.Begin()
-// 	defer func() {
-// 		if r := recover(); r != nil {
-// 			tx.Rollback()
-// 		}
-// 	}()
+	// อัปเดทข้อมูลด้วย Transaction
+	err = db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&model.Tasks{}).
+			Where("task_id = ?", taskID).
+			Updates(updates)
 
-// 	// อัปเดตใน SQL Database
-// 	result := tx.Model(&model.Tasks{}).Where("task_id = ? AND board_id = ?", taskIDInt, boardIDInt).Updates(updateData)
-// 	if result.Error != nil {
-// 		tx.Rollback()
-// 		c.JSON(http.StatusInternalServerError, gin.H{
-// 			"error": fmt.Sprintf("Failed to update task in database: %v", result.Error),
-// 		})
-// 		return
-// 	}
+		if result.Error != nil {
+			return result.Error
+		}
 
-// 	// ตรวจสอบว่ามีการอัปเดตจริงหรือไม่
-// 	if result.RowsAffected == 0 {
-// 		tx.Rollback()
-// 		c.JSON(http.StatusNotFound, gin.H{
-// 			"error": "Task not found or no changes made",
-// 		})
-// 		return
-// 	}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
 
-// 	// อัปเดตใน Firebase ถ้ามี updates
-// 	if len(firestoreUpdates) > 0 {
-// 		taskDocRef := firestoreClient.Collection("Boards").Doc(strconv.Itoa(adjustData.BoardID)).Collection("Tasks").Doc(strconv.Itoa(adjustData.TaskID))
+		return nil
+	})
 
-// 		_, err := taskDocRef.Update(ctx, firestoreUpdates)
-// 		if err != nil {
-// 			tx.Rollback()
-// 			c.JSON(http.StatusInternalServerError, gin.H{
-// 				"error": fmt.Sprintf("Failed to update task in Firebase: %v", err),
-// 			})
-// 			return
-// 		}
-// 	}
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Task not found or no changes made"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task"})
+		}
+		return
+	}
 
-// 	// Commit transaction
-// 	if err := tx.Commit().Error; err != nil {
-// 		c.JSON(http.StatusInternalServerError, gin.H{
-// 			"error": fmt.Sprintf("Failed to commit transaction: %v", err),
-// 		})
-// 		return
-// 	}
+	// ดึงข้อมูล task ที่อัปเดทแล้วเพื่อส่งกลับ
+	var updatedTask model.Tasks
+	if err := db.Where("task_id = ?", taskID).First(&updatedTask).Error; err != nil {
+		// ถ้าดึงข้อมูลไม่ได้ ก็ส่ง response สำเร็จแต่ไม่มีข้อมูล task
+		c.JSON(http.StatusOK, gin.H{
+			"message":       "Task updated successfully",
+			"taskId":        taskID,
+			"updatedFields": getUpdatedFieldNames(updates),
+		})
+		return
+	}
 
-// 	// เตรียม response data
-// 	responseData := gin.H{
-// 		"message": "Task updated successfully",
-// 		"task_id": adjustData.TaskID,
-// 	}
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Task updated successfully",
+		"task":          updatedTask,
+		"updatedFields": getUpdatedFieldNames(updates),
+	})
+}
 
-// 	// ส่ง response กลับ
-// 	c.JSON(http.StatusOK, responseData)
-// }
+// ฟังก์ชันช่วยเพื่อแปลงชื่อฟิลด์ที่อัปเดท
+func getUpdatedFieldNames(updates map[string]interface{}) []string {
+	var fields []string
+	for key := range updates {
+		switch key {
+		case "task_name":
+			fields = append(fields, "Task Name")
+		case "description":
+			fields = append(fields, "Description")
+		case "priority":
+			fields = append(fields, "Priority")
+		}
+	}
+	return fields
+}
