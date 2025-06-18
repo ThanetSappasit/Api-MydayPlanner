@@ -276,6 +276,7 @@ func extractBoardIDs(boardData, boardGroupData []map[string]interface{}) []uint 
 }
 
 // Updated function to include user tasks and handle null board_id
+// Updated function to include user tasks and handle null board_id
 func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint, userId uint) ([]map[string]interface{}, error) {
 	// Fetch tasks from boards + tasks with null board_id created by user
 	var tasksData []struct {
@@ -365,13 +366,28 @@ func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint, userId uint) ([]ma
 			boardDisplay = *task.BoardID
 		}
 
+		// Handle null Description and Priority - convert to empty string
+		var description string
+		if task.Description == nil {
+			description = ""
+		} else {
+			description = *task.Description
+		}
+
+		var priority string
+		if task.Priority == nil {
+			priority = ""
+		} else {
+			priority = *task.Priority
+		}
+
 		taskMap := map[string]interface{}{
 			"TaskID":        task.TaskID,
 			"BoardID":       boardDisplay, // This will be "Today" if board_id is null
 			"TaskName":      task.TaskName,
-			"Description":   task.Description,
+			"Description":   description, // Empty string if null
 			"Status":        task.Status,
-			"Priority":      task.Priority,
+			"Priority":      priority, // Empty string if null
 			"CreateBy":      task.CreateBy,
 			"CreatedAt":     task.CreateAt,
 			"Checklists":    buildChecklistsMap(checklistsByTask[task.TaskID]),
@@ -392,6 +408,7 @@ func buildChecklistsMap(checklists []model.Checklist) []map[string]interface{} {
 			"ChecklistID":   checklist.ChecklistID,
 			"TaskID":        checklist.TaskID,
 			"ChecklistName": checklist.ChecklistName,
+			"Status":        checklist.Status,
 			"CreatedAt":     checklist.CreateAt,
 		})
 	}
@@ -464,7 +481,7 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 	go func() {
 		defer wg.Done()
 		var checklistsData []model.Checklist
-		if err := db.Raw(`SELECT checklist_id, task_id, checklist_name, create_at 
+		if err := db.Raw(`SELECT checklist_id, task_id, checklist_name, status, create_at 
 			FROM checklists WHERE task_id IN (?)`, taskIDs).Scan(&checklistsData).Error; err != nil {
 			select {
 			case errorChan <- fmt.Errorf("failed to fetch checklists: %w", err):

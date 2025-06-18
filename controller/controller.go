@@ -3,7 +3,6 @@ package controller
 import (
 	"mydayplanner/controller/assigned"
 	"mydayplanner/controller/attachments"
-	"mydayplanner/controller/checklist"
 	"mydayplanner/controller/user"
 	"mydayplanner/middleware"
 
@@ -38,39 +37,6 @@ func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 
 func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
 
-}
-
-func ChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	router.POST("/checklist/:taskid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-		checklist.Checklist(c, db, firestoreClient)
-	})
-	router.PUT("/checklist/:checklistid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-		checklist.UpdateChecklist(c, db, firestoreClient)
-	})
-	router.PUT("/checklistfinish/:checklistid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-		checklist.FinishChecklist(c, db, firestoreClient)
-	})
-	router.DELETE("/checklist/:boardid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-		checklist.DeleteChecklist(c, db, firestoreClient)
-	})
-}
-
-func TodayChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	routes := router.Group("/todaychecklist", middleware.AccessTokenMiddleware())
-	{
-		routes.POST("/create/:taskid", func(c *gin.Context) {
-			checklist.CreateTodayChecklistFirebase(c, db, firestoreClient)
-		})
-		routes.PUT("/adjustchecklist", func(c *gin.Context) {
-			checklist.UpdateTodayChecklistFirebase(c, db, firestoreClient)
-		})
-		routes.PUT("/finish", func(c *gin.Context) {
-			checklist.FinishTodayChecklistFirebase(c, db, firestoreClient)
-		})
-		routes.DELETE("/checklist", func(c *gin.Context) {
-			checklist.DeleteTodayChecklistFirebase(c, db, firestoreClient)
-		})
-	}
 }
 
 func TodayAttachmentsController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {

@@ -8,10 +8,8 @@ type CreateChecklistTaskRequest struct {
 	ChecklistName string `json:"checklist_name" binding:"required"`
 }
 
-type AdjustTodayChecklistRequest struct {
-	TaskID        string `json:"task_id" binding:"required"`      // Task ID ที่ checklist อยู่ภายใต้
-	ChecklistID   string `json:"checklist_id" binding:"required"` // Checklist ID ที่จะอัปเดต
-	ChecklistName string `json:"checklist_name"`                  // ชื่อ checklist ใหม่
+type UpdateChecklistRequest struct {
+	ChecklistName string `json:"checklist_name" binding:"required,min=1,max=255"`
 }
 
 type FinishTodayChecklistRequest struct {
@@ -24,8 +22,7 @@ type AdjustChecklistRequest struct {
 }
 
 type DeleteChecklistRequest struct {
-	TaskID      string   `json:"task_id" binding:"required"`
-	ChecklistID []string `json:"checklist_id" binding:"required"` // ใช้ []string เพื่อรองรับการลบหลาย task
+	ChecklistIDs []string `json:"checklist_id" binding:"required"` // ใช้ []string เพื่อรองรับการลบหลาย task
 }
 
 type DeleteChecklistTodayRequest struct {
