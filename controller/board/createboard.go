@@ -55,8 +55,10 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 
 	// แปลงค่า is_group เป็นชื่อ collection
 	groupType := "Private"
+	isGroupBoard := false
 	if board.Is_group == "1" {
 		groupType = "Group"
+		isGroupBoard = true
 	}
 
 	// 2. สร้าง board ใน PostgreSQL ก่อน
@@ -78,7 +80,7 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	}
 
 	var deepLink string
-	if board.Is_group == "1" {
+	if isGroupBoard {
 		boardUser := model.BoardUser{
 			BoardID: newBoard.BoardID,
 			UserID:  user.UserID,
@@ -127,37 +129,6 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 		return
 	}
 
-	// 3. หลังจาก commit แล้ว ตอนนี้ newBoard.BoardID จะมีค่าแล้ว
-	// ส่งข้อมูลไป Firebase ผ่าน goroutine
-	errChan := make(chan error, 1)
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				if err, ok := r.(error); ok {
-					errChan <- err
-				} else {
-					errChan <- fmt.Errorf("panic in Firebase operation: %v", r)
-				}
-			}
-		}()
-
-		boardDataFirebase := gin.H{
-			"BoardID":   newBoard.BoardID,
-			"BoardName": newBoard.BoardName,
-			"CreatedBy": newBoard.CreatedBy,
-			"CreatedAt": newBoard.CreatedAt,
-			"Type":      groupType,
-		}
-
-		boardDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(newBoard.BoardID))
-		_, err := boardDoc.Set(ctx, boardDataFirebase)
-		errChan <- err
-	}()
-
-	// รอผลลัพธ์จาก Firebase
-	firestoreErr := <-errChan
-
 	// สร้าง response object
 	response := gin.H{
 		"message": "Board created successfully",
@@ -165,18 +136,58 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	}
 
 	// เพิ่ม deep_link ถ้าเป็น group board
-	if board.Is_group == "1" && deepLink != "" {
+	if isGroupBoard && deepLink != "" {
 		response["deep_link"] = deepLink
 	}
 
-	// ตรวจสอบ error จาก Firestore
-	if firestoreErr != nil {
-		// Log error แต่ไม่ fail ทั้งหมด เนื่องจาก PostgreSQL สำเร็จแล้ว
-		fmt.Printf("Firestore error (board created in DB): %v\n", firestoreErr)
-		response["message"] = "Board created successfully (with Firestore sync issue)"
-		response["warning"] = "Firestore sync failed but board was created"
-		c.JSON(http.StatusCreated, response)
-		return
+	// 3. บันทึกข้อมูลลง Firestore เฉพาะเมื่อเป็น Group Board เท่านั้น
+	if isGroupBoard {
+		// ส่งข้อมูลไป Firebase ผ่าน goroutine
+		errChan := make(chan error, 1)
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					if err, ok := r.(error); ok {
+						errChan <- err
+					} else {
+						errChan <- fmt.Errorf("panic in Firebase operation: %v", r)
+					}
+				}
+			}()
+
+			boardDataFirebase := gin.H{
+				"BoardID":   newBoard.BoardID,
+				"BoardName": newBoard.BoardName,
+				"CreatedBy": newBoard.CreatedBy,
+				"CreatedAt": newBoard.CreatedAt,
+				"Type":      groupType,
+				"Members":   []int{user.UserID}, // เพิ่ม members array
+				"MemberRoles": gin.H{
+					strconv.Itoa(user.UserID): "owner", // กำหนดสิทธิ์ owner ให้ผู้สร้าง
+				},
+			}
+
+			boardDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(newBoard.BoardID))
+			_, err := boardDoc.Set(ctx, boardDataFirebase)
+			errChan <- err
+		}()
+
+		// รอผลลัพธ์จาก Firebase
+		firestoreErr := <-errChan
+
+		// ตรวจสอบ error จาก Firestore
+		if firestoreErr != nil {
+			// Log error แต่ไม่ fail ทั้งหมด เนื่องจาก PostgreSQL สำเร็จแล้ว
+			fmt.Printf("Firestore error (board created in DB): %v\n", firestoreErr)
+			response["message"] = "Board created successfully (with Firestore sync issue)"
+			response["warning"] = "Firestore sync failed but board was created"
+			c.JSON(http.StatusCreated, response)
+			return
+		}
+
+		// สำหรับ Group Board ที่ sync กับ Firestore สำเร็จ
+		response["message"] = "Group board created successfully and synced to Firestore"
 	}
 
 	c.JSON(http.StatusCreated, response)
