@@ -41,6 +41,20 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return
 	}
 
+	// ตรวจสอบว่า user เป็นสมาชิกของ board หรือไม่
+	var boardUserCount int64
+	if err := db.Table("board_user").
+		Where("board_id = ? AND user_id = ?", task.BoardID, userId).
+		Count(&boardUserCount).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
+		return
+	}
+
+	if boardUserCount == 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You are not a member of this board"})
+		return
+	}
+
 	tx := db.Begin()
 	if tx.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
@@ -60,7 +74,7 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 	}
 
 	newTask := model.Tasks{
-		BoardID:     &task.BoardID, // ตั้งค่าเป็น nil เพื่อรองรับ board null
+		BoardID:     &task.BoardID, // ใช้ BoardID จาก request
 		TaskName:    task.TaskName,
 		Description: stringPtr(task.Description), // แปลงเป็น pointer
 		Status:      task.Status,
@@ -75,8 +89,14 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return
 	}
 
+	// ประกาศตัวแปร notification นอก if block
+	var notification model.Notification
+	var hasNotification bool
+
 	// Handle reminders
 	if task.Reminder != nil {
+		hasNotification = true
+
 		// รองรับรูปแบบวันที่ที่คุณส่งมา: 2025-06-20 09:53:09.638825
 		parsedDueDate, err := time.Parse("2006-01-02 15:04:05.999999", task.Reminder.DueDate)
 		if err != nil {
@@ -95,7 +115,7 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 			}
 		}
 
-		notification := model.Notification{
+		notification = model.Notification{
 			TaskID:           newTask.TaskID,
 			DueDate:          parsedDueDate,
 			RecurringPattern: task.Reminder.RecurringPattern,
@@ -118,10 +138,18 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
+	// สร้าง response object
+	response := gin.H{
 		"message": "Task created successfully",
 		"taskID":  newTask.TaskID,
-	})
+	}
+
+	// เพิ่ม notificationID เฉพาะเมื่อมีการสร้าง notification
+	if hasNotification {
+		response["notificationID"] = notification.NotificationID
+	}
+
+	c.JSON(http.StatusCreated, response)
 }
 
 func CreateTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -172,8 +200,14 @@ func CreateTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 		return
 	}
 
+	// ประกาศตัวแปร notification นอก if block
+	var notification model.Notification
+	var hasNotification bool
+
 	// Handle reminders
 	if task.Reminder != nil {
+		hasNotification = true
+
 		// รองรับรูปแบบวันที่ที่คุณส่งมา: 2025-06-20 09:53:09.638825
 		parsedDueDate, err := time.Parse("2006-01-02 15:04:05.999999", task.Reminder.DueDate)
 		if err != nil {
@@ -192,7 +226,7 @@ func CreateTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 			}
 		}
 
-		notification := model.Notification{
+		notification = model.Notification{
 			TaskID:           newTask.TaskID,
 			DueDate:          parsedDueDate,
 			RecurringPattern: task.Reminder.RecurringPattern,
@@ -215,8 +249,16 @@ func CreateTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
+	// สร้าง response object
+	response := gin.H{
 		"message": "Task created successfully",
 		"taskID":  newTask.TaskID,
-	})
+	}
+
+	// เพิ่ม notificationID เฉพาะเมื่อมีการสร้าง notification
+	if hasNotification {
+		response["notificationID"] = notification.NotificationID // แก้ไขให้ใช้ NotificationID (Pascal case)
+	}
+
+	c.JSON(http.StatusCreated, response)
 }

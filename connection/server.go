@@ -58,10 +58,10 @@ func StartServer() {
 	checklist.FinishChecklistController(router, DB, FB)
 
 	attachments.AttachmentsController(router, DB, FB)
+
 	shareboard.ShareboardController(router, DB, FB)
 
 	controller.UserController(router, DB, FB)
-	controller.TodayAttachmentsController(router, DB, FB)
 	controller.AssignedController(router, DB, FB)
 
 	router.Run()

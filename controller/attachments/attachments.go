@@ -1,7 +1,7 @@
 package attachments
 
 import (
-	"context"
+	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
@@ -18,122 +18,253 @@ func AttachmentsController(router *gin.Engine, db *gorm.DB, firestoreClient *fir
 	routes := router.Group("/attachment", middleware.AccessTokenMiddleware())
 	{
 		routes.POST("/create/:taskid", func(c *gin.Context) {
-			Attachment(c, db, firestoreClient)
+			CreateAttachment(c, db, firestoreClient)
 		})
-		routes.DELETE("/delete/:attachmentid", func(c *gin.Context) {
+		routes.DELETE("/delete/:taskid/:attachmentid", func(c *gin.Context) {
 			DeleteAttachment(c, db, firestoreClient)
 		})
 	}
 }
 
-func Attachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-	userId := c.MustGet("userId").(uint)
-	taskID := c.Param("taskid")
+func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userID := c.MustGet("userId").(uint)
+
+	taskIDStr := c.Param("taskid")
+	if taskIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Task ID is required"})
+		return
+	}
+
+	// แปลง string ID เป็น int
+	taskID, err := strconv.Atoi(taskIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+
 	var req dto.CreateAttachmentsTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 		return
 	}
 
-	// Get user email for Firebase path
-	var user model.User
-	if err := db.Raw("SELECT user_id, email FROM user WHERE user_id = ?", userId).Scan(&user).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user email"})
+	// ===================
+	// ดึงข้อมูล task
+	var task struct {
+		TaskID   int  `db:"task_id"`
+		BoardID  *int `db:"board_id"`
+		CreateBy *int `db:"create_by"`
+	}
+
+	if err := db.Table("tasks").
+		Select("task_id, board_id, create_by").
+		Where("task_id = ?", taskID).
+		First(&task).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch task"})
+		}
 		return
 	}
 
-	// Convert taskID from string to int
-	taskIDInt, err := strconv.Atoi(taskID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+	// ตรวจสอบสิทธิ์
+	canCreate := false
+
+	if task.BoardID == nil {
+		// Task ไม่มี board_id - ตรวจสอบ create_by
+		if task.CreateBy != nil && *task.CreateBy == int(userID) {
+			canCreate = true
+		}
+	} else {
+		// Task มี board_id - ตรวจสอบสิทธิ์แบบ 2 เงื่อนไข
+		// 1. ถ้าเป็นคนสร้าง task (create_by = user_id)
+		if task.CreateBy != nil && *task.CreateBy == int(userID) {
+			canCreate = true
+		} else {
+			// 2. ถ้าเป็นสมาชิกของ board (ผ่าน board_user)
+			var count int64
+			query := `
+				SELECT COUNT(1)
+				FROM tasks t
+				JOIN board_user bu ON t.board_id = bu.board_id
+				WHERE t.task_id = ? AND bu.user_id = ?
+			`
+
+			if err := db.Raw(query, taskID, userID).Count(&count).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
+				return
+			}
+
+			if count > 0 {
+				canCreate = true
+			}
+		}
+	}
+
+	if !canCreate {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 		return
 	}
 
 	// Create attachment record
-	attachment := model.Attachment{
-		TasksID:  taskIDInt,
-		FileName: req.Filename,
-		FilePath: req.Filepath,
-		FileType: req.Filetype,
-		UploadAt: time.Now(),
-	}
+	var attachment model.Attachment
 
-	// Save to SQL database
-	if err := db.Create(&attachment).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attachment"})
-		return
-	}
+	// Start transaction
+	err = db.Transaction(func(tx *gorm.DB) error {
+		attachment = model.Attachment{
+			TasksID:  taskID,
+			FileName: req.Filename,
+			FilePath: req.Filepath,
+			FileType: req.Filetype,
+			UploadAt: time.Now(),
+		}
 
-	// Get the generated AttachmentID
-	attachmentID := attachment.AttachmentID
+		// Save to SQL database
+		if err := tx.Create(&attachment).Error; err != nil {
+			return err
+		}
 
-	// Prepare Firebase document data
-	firestoreData := map[string]interface{}{
-		"AttachmentID": attachmentID,
-		"TaskID":       taskID,
-		"Filename":     attachment.FileName,
-		"Filepath":     attachment.FilePath,
-		"Filetype":     attachment.FileType,
-		"UploadAt":     attachment.UploadAt,
-	}
+		return nil
+	})
 
-	// Save to Firebase using Set() with specific document ID
-	ctx := context.Background()
-	docRef := firestoreClient.Collection("Attachments").Doc(strconv.Itoa(attachmentID))
-	_, err = docRef.Set(ctx, firestoreData)
 	if err != nil {
-		// Log the error but don't fail the request since SQL save was successful
-		c.JSON(http.StatusPartialContent, gin.H{
-			"message":       "Attachment created in database but failed to sync with Firebase",
-			"attachment_id": attachmentID,
-			"error":         err.Error(),
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attachment"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":       "Attachment created successfully",
-		"attachment_id": attachmentID,
+		"attachment_id": attachment.AttachmentID,
+		"attachment": gin.H{
+			"attachment_id": attachment.AttachmentID,
+			"task_id":       attachment.TasksID,
+			"file_name":     attachment.FileName,
+			"file_path":     attachment.FilePath,
+			"file_type":     attachment.FileType,
+			"upload_at":     attachment.UploadAt,
+		},
 	})
 }
 
 func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userID := c.MustGet("userId").(uint)
-	attachmentID := c.Param("attachmentid")
+	taskIDStr := c.Param("taskid")
+	attachmentIDStr := c.Param("attachmentid")
 
-	var hasAnyData int
-	if err := db.Raw(`
-		SELECT 
-			CASE 
-				WHEN EXISTS(SELECT 1 FROM board WHERE create_by = ?) OR
-					 EXISTS(SELECT 1 FROM board_user WHERE user_id = ?) OR
-					 EXISTS(SELECT 1 FROM tasks WHERE create_by = ?)
-				THEN 1 
-				ELSE 0 
-			END as has_any_data
-	`, userID, userID, userID).Scan(&hasAnyData).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check user data"})
-		return
-	}
-	if hasAnyData == 0 {
-		c.JSON(http.StatusForbidden, gin.H{"error": "User has no permission to delete this attachment"})
+	// แปลง taskID เป็น int
+	taskID, err := strconv.Atoi(taskIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
 		return
 	}
 
-	// ลบ tasks จาก GORM ก่อน
-	if err := db.Where("attachment_id = ? ", attachmentID).Delete(&model.Attachment{}).Error; err != nil {
-		c.JSON(500, gin.H{"error": "Failed to delete attachment from database"})
+	// แปลง attachmentID เป็น int
+	attachmentIDInt, err := strconv.Atoi(attachmentIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid attachment ID"})
 		return
 	}
 
-	// ลบ tasks จาก Firestore หลังจากลบจาก SQL เรียบร้อยแล้ว
-	ctx := c.Request.Context()
+	// ตรวจสอบว่า attachment นี้เป็นของ task ที่ระบุหรือไม่
+	var existingAttachment struct {
+		AttachmentID int `db:"attachment_id"`
+		TasksID      int `db:"tasks_id"` // แก้ไขให้ตรงกับ model
+	}
 
-	if _, err := firestoreClient.Collection("Attachments").Doc(attachmentID).Delete(ctx); err != nil {
-		// ถ้าลบจาก Firestore ล้มเหลว อาจต้องพิจารณา rollback การลบจาก SQL
-		c.JSON(500, gin.H{"error": "Failed to delete attachments from Firestore"})
+	if err := db.Table("attachments").
+		Select("attachment_id, tasks_id").
+		Where("attachment_id = ? AND tasks_id = ?", attachmentIDInt, taskID). // แก้ไขให้ตรงกับ model
+		First(&existingAttachment).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Attachment not found or not belong to specified task"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch attachment"})
+		}
 		return
 	}
 
-	c.JSON(200, gin.H{"message": "attachments deleted successfully"})
+	// ตรวจสอบสิทธิ์ในการเข้าถึง task
+	var task struct {
+		TaskID   int  `db:"task_id"`
+		BoardID  *int `db:"board_id"`
+		CreateBy *int `db:"create_by"`
+	}
+
+	if err := db.Table("tasks").
+		Select("task_id, board_id, create_by").
+		Where("task_id = ?", taskID).
+		First(&task).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch task"})
+		}
+		return
+	}
+
+	// ตรวจสอบสิทธิ์
+	canDelete := false
+
+	if task.BoardID == nil {
+		// Task ไม่มี board_id - ตรวจสอบ create_by
+		if task.CreateBy != nil && *task.CreateBy == int(userID) {
+			canDelete = true
+		}
+	} else {
+		// Task มี board_id - ตรวจสอบสิทธิ์แบบ 2 เงื่อนไข
+		// 1. ถ้าเป็นคนสร้าง task (create_by = user_id)
+		if task.CreateBy != nil && *task.CreateBy == int(userID) {
+			canDelete = true
+		} else {
+			// 2. ถ้าเป็นสมาชิกของ board (ผ่าน board_user)
+			var count int64
+			query := `
+				SELECT COUNT(1)
+				FROM tasks t
+				JOIN board_user bu ON t.board_id = bu.board_id
+				WHERE t.task_id = ? AND bu.user_id = ?
+			`
+
+			if err := db.Raw(query, taskID, userID).Count(&count).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
+				return
+			}
+
+			if count > 0 {
+				canDelete = true
+			}
+		}
+	}
+
+	if !canDelete {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		return
+	}
+
+	// ลบ attachment ด้วย Transaction
+	err = db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Where("attachment_id = ?", attachmentIDInt).Delete(&model.Attachment{})
+		if result.Error != nil {
+			return result.Error
+		}
+
+		// ตรวจสอบว่าลบได้จริงหรือไม่
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("attachment not found or already deleted")
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete attachment"})
+		return
+	}
+
+	// แก้ไข response message
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Attachment deleted successfully", // แก้ไขจาก "Checklist deleted successfully"
+		"attachment_id": attachmentIDInt,
+	})
 }

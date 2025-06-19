@@ -2,7 +2,6 @@ package controller
 
 import (
 	"mydayplanner/controller/assigned"
-	"mydayplanner/controller/attachments"
 	"mydayplanner/controller/user"
 	"mydayplanner/middleware"
 
@@ -37,18 +36,6 @@ func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 
 func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
 
-}
-
-func TodayAttachmentsController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	routes := router.Group("/todayattechments", middleware.AccessTokenMiddleware())
-	{
-		routes.POST("/create/:taskid", func(c *gin.Context) {
-			attachments.CreateTodayAttachmentsFirebase(c, db, firestoreClient)
-		})
-		routes.DELETE("/attachment", func(c *gin.Context) {
-			attachments.DeleteTodayTaskAttachment(c, db, firestoreClient)
-		})
-	}
 }
 
 func AssignedController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
