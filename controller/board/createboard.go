@@ -163,9 +163,6 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 				"CreatedAt": newBoard.CreatedAt,
 				"Type":      groupType,
 				"Members":   []int{user.UserID}, // เพิ่ม members array
-				"MemberRoles": gin.H{
-					strconv.Itoa(user.UserID): "owner", // กำหนดสิทธิ์ owner ให้ผู้สร้าง
-				},
 			}
 
 			boardDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(newBoard.BoardID))

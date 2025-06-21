@@ -5,10 +5,15 @@ import (
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
+	"mydayplanner/model"
 	"net/http"
+	"strconv"
+	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"gorm.io/gorm"
 )
 
@@ -38,102 +43,188 @@ func DeleteBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 
 	var errors []string
 	var deletedBoards []string
+	var unauthorizedBoards []string
+	var notFoundBoards []string
+
+	// สร้าง context สำหรับ Firestore operations
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
 
 	// Delete each board
-	for _, boardID := range dataID.BoardID {
-		// First delete from SQL
-		sqlDeleteErr := deleteBoardFromSQL(db, user.UserID, boardID)
-		if sqlDeleteErr != nil {
-			errors = append(errors, fmt.Sprintf("Failed to delete board %s from SQL: %v", boardID, sqlDeleteErr))
-			continue // Skip Firebase deletion if SQL deletion fails
+	for _, boardIDStr := range dataID.BoardID {
+		boardID, err := strconv.Atoi(boardIDStr)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Invalid board ID format: %s", boardIDStr))
+			continue
 		}
 
-		// Then delete from Firebase
-		ctx := context.Background()
-		firebaseDeleteErr := deleteBoardFromFirebase(ctx, firestoreClient, boardID)
-		if firebaseDeleteErr != nil {
-			errors = append(errors, fmt.Sprintf("Failed to delete board %s from Firebase: %v", boardID, firebaseDeleteErr))
-			// Note: SQL deletion already succeeded, you might want to handle rollback here
-		} else {
-			deletedBoards = append(deletedBoards, boardID)
+		// ตรวจสอบสิทธิ์และลบ board
+		deleteResult := deleteBoardWithPermissionCheck(db, firestoreClient, ctx, user.UserID, boardID)
+
+		switch deleteResult.Status {
+		case "success":
+			deletedBoards = append(deletedBoards, boardIDStr)
+		case "unauthorized":
+			unauthorizedBoards = append(unauthorizedBoards, boardIDStr)
+		case "not_found":
+			notFoundBoards = append(notFoundBoards, boardIDStr)
+		case "error":
+			errors = append(errors, fmt.Sprintf("Board %s: %s", boardIDStr, deleteResult.Error))
 		}
+	}
+
+	// สร้าง response
+	response := gin.H{}
+
+	if len(deletedBoards) > 0 {
+		response["deleted_boards"] = deletedBoards
+	}
+
+	if len(unauthorizedBoards) > 0 {
+		response["unauthorized_boards"] = unauthorizedBoards
+		response["unauthorized_message"] = "You don't have permission to delete these boards"
+	}
+
+	if len(notFoundBoards) > 0 {
+		response["not_found_boards"] = notFoundBoards
+		response["not_found_message"] = "These boards were not found"
 	}
 
 	if len(errors) > 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":          "Some boards failed to delete",
-			"details":        errors,
-			"deleted_boards": deletedBoards,
-		})
-		return
+		response["errors"] = errors
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":        "Boards deleted successfully",
-		"deleted_boards": deletedBoards,
-	})
+	// กำหนด HTTP status และ message
+	if len(deletedBoards) == len(dataID.BoardID) {
+		// ลบสำเร็จทั้งหมด
+		response["message"] = "All boards deleted successfully"
+		c.JSON(http.StatusOK, response)
+	} else if len(deletedBoards) > 0 {
+		// ลบสำเร็จบางส่วน
+		response["message"] = "Some boards were deleted successfully"
+		c.JSON(http.StatusPartialContent, response)
+	} else {
+		// ลบไม่สำเร็จเลย
+		if len(unauthorizedBoards) > 0 {
+			response["message"] = "No boards were deleted due to permission issues"
+			c.JSON(http.StatusForbidden, response)
+		} else if len(notFoundBoards) > 0 {
+			response["message"] = "No boards were deleted - boards not found"
+			c.JSON(http.StatusNotFound, response)
+		} else {
+			response["message"] = "No boards were deleted due to errors"
+			c.JSON(http.StatusInternalServerError, response)
+		}
+	}
 }
 
-// deleteBoardFromSQL deletes board data from SQL database
-func deleteBoardFromSQL(db *gorm.DB, userID int, boardID string) error {
-	// Delete board from SQL (adjust table name and column names as needed)
-	result := db.Exec("DELETE FROM board WHERE create_by = ? AND board_id = ?", userID, boardID)
-	if result.Error != nil {
-		return fmt.Errorf("failed to delete from database: %w", result.Error)
-	}
-
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("board not found or not owned by user")
-	}
-
-	return nil
+// DeleteResult represents the result of a board deletion operation
+type DeleteResult struct {
+	Status string // "success", "unauthorized", "not_found", "error"
+	Error  string
 }
 
-// deleteBoardFromFirebase deletes board and its tasks from Firebase
-func deleteBoardFromFirebase(ctx context.Context, client *firestore.Client, boardID string) error {
-	// Reference to the board document
-	boardRef := client.Collection("Boards").Doc(boardID)
-
-	// First delete all tasks in the Tasks subcollection
-	if err := deleteTasksCollection(ctx, client, boardRef); err != nil {
-		return fmt.Errorf("failed to delete tasks: %w", err)
+// deleteBoardWithPermissionCheck ตรวจสอบสิทธิ์และลบ board
+func deleteBoardWithPermissionCheck(db *gorm.DB, firestoreClient *firestore.Client, ctx context.Context, userID int, boardID int) DeleteResult {
+	// 1. ตรวจสอบว่า board มีอยู่และ user เป็นเจ้าของหรือไม่
+	var board model.Board
+	if err := db.Where("board_id = ?", boardID).First(&board).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return DeleteResult{Status: "not_found", Error: "Board not found"}
+		}
+		return DeleteResult{Status: "error", Error: fmt.Sprintf("Database error: %v", err)}
 	}
 
-	// Then delete the board document
-	if _, err := boardRef.Delete(ctx); err != nil {
-		return fmt.Errorf("failed to delete board document: %w", err)
+	// 2. ตรวจสอบสิทธิ์ - เฉพาะเจ้าของเท่านั้นที่ลบได้
+	if board.CreatedBy != userID {
+		return DeleteResult{Status: "unauthorized", Error: "You are not the owner of this board"}
 	}
 
-	return nil
+	// 3. ตรวจสอบว่าเป็น group board หรือไม่ ก่อนลบข้อมูล
+	var boardUserCount int64
+	if err := db.Model(&model.BoardUser{}).Where("board_id = ?", boardID).Count(&boardUserCount).Error; err != nil {
+		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to check board users: %v", err)}
+	}
+	isGroupBoard := boardUserCount > 0
+
+	// 4. เริ่ม transaction เพื่อลบข้อมูลใน SQL ก่อน
+	tx := db.Begin()
+	if tx.Error != nil {
+		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to start transaction: %v", tx.Error)}
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// 5. ลบ board หลัก (CASCADE จะลบ related records อัตโนมัติ)
+	if err := tx.Delete(&board).Error; err != nil {
+		tx.Rollback()
+		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to delete board: %v", err)}
+	}
+
+	// 6. Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to commit transaction: %v", err)}
+	}
+
+	// 7. ลบจาก Firestore หลังจากลบ SQL สำเร็จแล้ว (ถ้าเป็น group board)
+	if isGroupBoard {
+		if err := deleteFromFirestore(firestoreClient, ctx, boardID); err != nil {
+			// Log error แต่ไม่ return error เพราะ SQL deletion สำเร็จแล้ว
+			fmt.Printf("WARNING: Board %d deleted from SQL but failed to delete from Firestore: %v\n", boardID, err)
+			// Optional: เก็บ log นี้ไว้เพื่อ manual cleanup ภายหลัง
+		}
+	}
+
+	return DeleteResult{Status: "success", Error: ""}
 }
 
-// deleteTasksCollection deletes all task documents from the Tasks subcollection
-func deleteTasksCollection(ctx context.Context, client *firestore.Client, boardRef *firestore.DocumentRef) error {
-	tasksCollection := boardRef.Collection("Tasks")
+// deleteFromFirestore ลบข้อมูลจาก Firestore
+func deleteFromFirestore(firestoreClient *firestore.Client, ctx context.Context, boardID int) error {
+	boardDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(boardID))
 
-	// Get all task documents
+	// 1. ตรวจสอบว่า document มีอยู่หรือไม่
+	docSnapshot, err := boardDoc.Get(ctx)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			fmt.Printf("Board %d not found in Firestore (already deleted or never existed)\n", boardID)
+			return nil // ไม่ถือเป็น error เพราะ document ไม่มีอยู่แล้ว
+		}
+		return fmt.Errorf("failed to check board existence in Firestore: %v", err)
+	}
+
+	if !docSnapshot.Exists() {
+		fmt.Printf("Board %d document does not exist in Firestore\n", boardID)
+		return nil
+	}
+
+	// 2. ลบ subcollections ก่อน (Tasks)
+	tasksCollection := boardDoc.Collection("Tasks")
+
+	// ใช้ batch delete สำหรับ subcollections
+	batch := firestoreClient.Batch()
 	taskDocs, err := tasksCollection.Documents(ctx).GetAll()
 	if err != nil {
-		return fmt.Errorf("failed to get task documents: %w", err)
-	}
-
-	// Delete documents in batches (Firestore batch limit is 500)
-	batchSize := 500
-	for i := 0; i < len(taskDocs); i += batchSize {
-		end := i + batchSize
-		if end > len(taskDocs) {
-			end = len(taskDocs)
-		}
-
-		batch := client.Batch()
-		for j := i; j < end; j++ {
-			batch.Delete(taskDocs[j].Ref)
-		}
-
-		if _, err := batch.Commit(ctx); err != nil {
-			return fmt.Errorf("failed to commit batch delete for tasks: %w", err)
+		fmt.Printf("Warning: Failed to get tasks for board %d: %v\n", boardID, err)
+	} else {
+		fmt.Printf("Found %d tasks to delete for board %d\n", len(taskDocs), boardID)
+		for _, taskDoc := range taskDocs {
+			batch.Delete(taskDoc.Ref)
 		}
 	}
 
+	// 3. เพิ่มการลบ main document ลงใน batch
+	batch.Delete(boardDoc)
+
+	// 4. Commit batch
+	_, err = batch.Commit(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to commit Firestore batch deletion: %v", err)
+	}
+
+	fmt.Printf("Successfully deleted board %d from Firestore\n", boardID)
 	return nil
 }
