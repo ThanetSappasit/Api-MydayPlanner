@@ -41,20 +41,6 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return
 	}
 
-	// ตรวจสอบว่า user เป็นสมาชิกของ board หรือไม่
-	var boardUserCount int64
-	if err := db.Table("board_user").
-		Where("board_id = ? AND user_id = ?", task.BoardID, userId).
-		Count(&boardUserCount).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
-		return
-	}
-
-	if boardUserCount == 0 {
-		c.JSON(http.StatusForbidden, gin.H{"error": "You are not a member of this board"})
-		return
-	}
-
 	tx := db.Begin()
 	if tx.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
