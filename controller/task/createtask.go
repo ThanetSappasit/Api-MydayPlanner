@@ -49,6 +49,7 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return
 	}
 
+	var shouldSaveToFirestore = false
 	var boardUser model.BoardUser
 	if err := db.Where("board_id = ?", task.BoardID).First(&boardUser).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -62,11 +63,15 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 				}
 				return
 			}
-			// ถ้าเจอบอร์ดที่ userId เป็นคนสร้าง ก็ให้ผ่าน
+			// ถ้าเจอบอร์ดที่ userId เป็นคนสร้าง ไม่ต้องบันทึก Firebase
+			shouldSaveToFirestore = false
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
 			return
 		}
+	} else {
+		// เจอ boardUser แล้ว ให้บันทึก Firebase ด้วย
+		shouldSaveToFirestore = true
 	}
 
 	// เริ่ม transaction
@@ -136,23 +141,25 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return
 	}
 
-	// บันทึกลง Firestore (หลัง database commit สำเร็จ)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// บันทึกลง Firestore (หลัง database commit สำเร็จ) - เฉพาะเมื่อเจอ boardUser เท่านั้น
+	if shouldSaveToFirestore {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	boardIDInt := int(task.BoardID)
-	// บันทึก task ลง Firestore
-	if err := saveTaskToFirestore(ctx, firestoreClient, &newTask, boardIDInt); err != nil {
-		// Log error แต่ไม่ return เพราะ database บันทึกสำเร็จแล้ว
-		// ควรมี logging system ที่นี่
-		fmt.Printf("Warning: Failed to save task to Firestore: %v\n", err)
-	}
+		boardIDInt := int(task.BoardID)
+		// บันทึก task ลง Firestore
+		if err := saveTaskToFirestore(ctx, firestoreClient, &newTask, boardIDInt); err != nil {
+			// Log error แต่ไม่ return เพราะ database บันทึกสำเร็จแล้ว
+			// ควรมี logging system ที่นี่
+			fmt.Printf("Warning: Failed to save task to Firestore: %v\n", err)
+		}
 
-	// บันทึก notification ลง Firestore ถ้ามี
-	if hasNotification {
-		if err := saveNotificationToFirestore(ctx, firestoreClient, &notification, user.Email); err != nil {
-			// Log error แต่ไม่ return
-			fmt.Printf("Warning: Failed to save notification to Firestore: %v\n", err)
+		// บันทึก notification ลง Firestore ถ้ามี
+		if hasNotification {
+			if err := saveNotificationToFirestore(ctx, firestoreClient, &notification, user.Email); err != nil {
+				// Log error แต่ไม่ return
+				fmt.Printf("Warning: Failed to save notification to Firestore: %v\n", err)
+			}
 		}
 	}
 
