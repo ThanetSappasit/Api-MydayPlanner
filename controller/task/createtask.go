@@ -52,11 +52,21 @@ func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 	var boardUser model.BoardUser
 	if err := db.Where("board_id = ?", task.BoardID).First(&boardUser).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Board user not found"})
+			// ตรวจสอบว่า user เป็นเจ้าของบอร์ดหรือไม่
+			var board model.Board
+			if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userId).First(&board).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					c.JSON(http.StatusNotFound, gin.H{"error": "Access denied: not a board member or board owner"})
+				} else {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
+				}
+				return
+			}
+			// ถ้าเจอบอร์ดที่ userId เป็นคนสร้าง ก็ให้ผ่าน
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
+			return
 		}
-		return
 	}
 
 	// เริ่ม transaction
