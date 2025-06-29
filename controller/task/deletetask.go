@@ -88,17 +88,17 @@ func DeleteTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 
 	// ตรวจสอบสิทธิ์ในการเข้าถึง board สำหรับ tasks ที่มี board_id (ถ้ามี)
 	if len(tasksWithBoard) > 0 {
-		// ใช้ Raw SQL เพื่อประสิทธิภาพที่ดีกว่า
+		// ตรวจสอบว่า user เป็นผู้สร้าง board หรือไม่
 		var authorizedTasksWithBoard []int
 		query := `
 			SELECT DISTINCT t.task_id
 			FROM tasks t
-			JOIN board_user bu ON t.board_id = bu.board_id
-			WHERE t.task_id IN ? AND bu.user_id = ?
+			JOIN board b ON t.board_id = b.board_id
+			WHERE t.task_id IN ? AND b.create_by = ?
 		`
 
 		if err := db.Raw(query, tasksWithBoard, userID).Scan(&authorizedTasksWithBoard).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
 			return
 		}
 
