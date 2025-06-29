@@ -1,6 +1,7 @@
 package checklist
 
 import (
+	"context"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
@@ -149,6 +150,26 @@ func DeleteChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete checklists"})
 		return
+	}
+
+	// ✅ ลบ checklist จาก Firestore ถ้ามีสมาชิกในบอร์ด
+	if task.BoardID != nil {
+		var boardUserCount int64
+		if err := db.Model(&model.BoardUser{}).
+			Where("board_id = ?", *task.BoardID).
+			Count(&boardUserCount).Error; err != nil {
+			fmt.Printf("⚠️ Failed to check board users for Firestore deletion: %v", err)
+		} else if boardUserCount > 0 {
+			ctx := context.Background() // หรือใช้ ctx จาก `c.Request.Context()` ก็ได้
+
+			for _, checklistID := range deletableChecklistIDs {
+				docID := strconv.Itoa(checklistID)
+				_, err := firestoreClient.Collection("Checklist").Doc(docID).Delete(ctx)
+				if err != nil {
+					fmt.Printf("⚠️ Failed to delete checklist %s from Firestore: %v", docID, err)
+				}
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

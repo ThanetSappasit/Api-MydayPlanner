@@ -218,7 +218,7 @@ func saveTaskToFirestore(ctx context.Context, client *firestore.Client, task *mo
 }
 
 func saveNotificationToFirestore(ctx context.Context, client *firestore.Client, notification *model.Notification, email string) error {
-	notificationPath := fmt.Sprintf("Notifications/%s/Task/%d", email, notification.NotificationID)
+	notificationPath := fmt.Sprintf("Notifications/%s/Tasks/%d", email, notification.NotificationID)
 
 	notificationData := map[string]interface{}{
 		"notificationID": notification.NotificationID,

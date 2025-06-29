@@ -1,6 +1,7 @@
 package attachments
 
 import (
+	"context"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
@@ -28,6 +29,7 @@ func AttachmentsController(router *gin.Engine, db *gorm.DB, firestoreClient *fir
 
 func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userID := c.MustGet("userId").(uint)
+	ctx := context.Background()
 
 	taskIDStr := c.Param("taskid")
 	if taskIDStr == "" {
@@ -131,6 +133,39 @@ func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create attachment"})
 		return
+	}
+
+	// ✅ ตรวจสอบสมาชิก board และส่งข้อมูลไป Firestore ถ้ามีสมาชิก
+	if task.BoardID != nil {
+		var count int64
+		err := db.Model(&model.BoardUser{}).
+			Where("board_id = ?", *task.BoardID).
+			Count(&count).Error
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error while verifying board users"})
+			return
+		}
+
+		if count == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "No board users found for this board"})
+			return
+		}
+
+		// ✅ ถ้ามีสมาชิกในบอร์ด ให้บันทึกลง Firestore
+		_, err = firestoreClient.Collection("Attachments").Doc(strconv.Itoa(int(attachment.AttachmentID))).Set(ctx, map[string]interface{}{
+			"attachment_id": attachment.AttachmentID,
+			"tasks_id":      attachment.TasksID,
+			"file_name":     attachment.FileName,
+			"file_path":     attachment.FilePath,
+			"file_type":     attachment.FileType,
+			"upload_at":     attachment.UploadAt,
+		})
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save checklist to Firestore"})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -260,6 +295,25 @@ func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete attachment"})
 		return
+	}
+
+	// ✅ ลบ checklist จาก Firestore ถ้ามีสมาชิกในบอร์ด
+	if task.BoardID != nil {
+		var boardUserCount int64
+		if err := db.Model(&model.BoardUser{}).
+			Where("board_id = ?", *task.BoardID).
+			Count(&boardUserCount).Error; err != nil {
+			fmt.Printf("⚠️ Failed to check board users for Firestore deletion: %v", err)
+		} else if boardUserCount > 0 {
+			ctx := context.Background() // หรือใช้ ctx จาก `c.Request.Context()` ก็ได้
+
+			// ลบ attachment จาก Firestore collection "Attachments"
+			_, err := firestoreClient.Collection("Attachments").Doc(strconv.Itoa(attachmentIDInt)).Delete(ctx)
+			if err != nil {
+				fmt.Printf("⚠️ Failed to delete attachment from Firestore: %v\n", err)
+			}
+
+		}
 	}
 
 	// แก้ไข response message

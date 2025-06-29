@@ -1,6 +1,7 @@
 package checklist
 
 import (
+	"context"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
@@ -20,6 +21,7 @@ func CreateChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient 
 }
 
 func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	ctx := context.Background()
 	userId := c.MustGet("userId").(uint)
 
 	taskIDStr := c.Param("taskid")
@@ -28,7 +30,6 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		return
 	}
 
-	// แปลง string ID เป็น int
 	taskID, err := strconv.Atoi(taskIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
@@ -41,8 +42,6 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		return
 	}
 
-	// ===================
-	// ดึงข้อมูล task
 	var task struct {
 		TaskID   int  `db:"task_id"`
 		BoardID  *int `db:"board_id"`
@@ -61,21 +60,16 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		return
 	}
 
-	// ตรวจสอบสิทธิ์
 	canDelete := false
 
 	if task.BoardID == nil {
-		// Task ไม่มี board_id - ตรวจสอบ create_by
 		if task.CreateBy != nil && *task.CreateBy == int(userId) {
 			canDelete = true
 		}
 	} else {
-		// Task มี board_id - ตรวจสอบสิทธิ์แบบ 2 เงื่อนไข
-		// 1. ถ้าเป็นคนสร้าง task (create_by = user_id)
 		if task.CreateBy != nil && *task.CreateBy == int(userId) {
 			canDelete = true
 		} else {
-			// 2. ถ้าเป็นสมาชิกของ board (ผ่าน board_user)
 			var count int64
 			query := `
 				SELECT COUNT(1)
@@ -100,10 +94,8 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		return
 	}
 
-	// Create checklist record
 	var checklist model.Checklist
 
-	// Start transaction
 	err = db.Transaction(func(tx *gorm.DB) error {
 		checklist = model.Checklist{
 			TaskID:        taskID,
@@ -112,7 +104,6 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 			CreateAt:      time.Now(),
 		}
 
-		// Save to SQL database
 		if err := tx.Create(&checklist).Error; err != nil {
 			return err
 		}
@@ -125,8 +116,40 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		return
 	}
 
+	// ✅ ตรวจสอบสมาชิก board และส่งข้อมูลไป Firestore ถ้ามีสมาชิก
+	if task.BoardID != nil {
+		var count int64
+		err := db.Model(&model.BoardUser{}).
+			Where("board_id = ?", *task.BoardID).
+			Count(&count).Error
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error while verifying board users"})
+			return
+		}
+
+		if count == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "No board users found for this board"})
+			return
+		}
+
+		// ✅ ถ้ามีสมาชิกในบอร์ด ให้บันทึกลง Firestore
+		_, err = firestoreClient.Collection("Checklist").Doc(strconv.Itoa(int(checklist.ChecklistID))).Set(ctx, map[string]interface{}{
+			"checklist_id":   checklist.ChecklistID,
+			"task_id":        checklist.TaskID,
+			"checklist_name": checklist.ChecklistName,
+			"status":         checklist.Status,
+			"create_at":      checklist.CreateAt,
+		})
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save checklist to Firestore"})
+			return
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"message":      "Checklist created successfully",
-		"checklist_id": checklist.ChecklistID, // แก้ไขตัวแปรให้ถูกต้อง
+		"checklist_id": checklist.ChecklistID,
 	})
 }
