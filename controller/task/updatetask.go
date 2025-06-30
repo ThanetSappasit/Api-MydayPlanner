@@ -1,6 +1,8 @@
 package task
 
 import (
+	"errors"
+	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
@@ -59,42 +61,47 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return
 	}
 
-	// ตรวจสอบสิทธิ์
+	// ตรวจสอบสิทธิ์และเก็บข้อมูลว่าเป็น board_user หรือไม่
 	canUpdate := false
+	isBoardUser := false
 
 	if task.BoardID == nil {
-		// Task ไม่มี board_id - ตรวจสอบ create_by
+		// Task ที่ไม่มี board_id - ตรวจสอบ create_by
 		if task.CreateBy != nil && *task.CreateBy == int(userId) {
 			canUpdate = true
 		}
 	} else {
-		// Task มี board_id - ตรวจสอบสิทธิ์แบบ 2 เงื่อนไข
-		// 1. ถ้าเป็นคนสร้าง task (create_by = user_id)
-		if task.CreateBy != nil && *task.CreateBy == int(userId) {
-			canUpdate = true
-		} else {
-			// 2. ถ้าเป็นสมาชิกของ board (ผ่าน board_user)
-			var count int64
-			query := `
-				SELECT COUNT(1)
-				FROM tasks t
-				JOIN board_user bu ON t.board_id = bu.board_id
-				WHERE t.task_id = ? AND bu.user_id = ?
-			`
-
-			if err := db.Raw(query, taskID, userId).Count(&count).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
+		// Task ที่มี board_id - ตรวจสอบตามลำดับ
+		// 1. ตรวจสอบว่า user เป็นสมาชิกของ board หรือไม่
+		var boardUser model.BoardUser
+		if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userId).First(&boardUser).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// 2. ถ้าไม่เป็นสมาชิก ให้ตรวจสอบว่าเป็นผู้สร้าง board หรือไม่
+				var board model.Board
+				if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userId).First(&board).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: You are not the board owner or member"})
+					} else {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
+					}
+					return
+				}
+				// เป็นเจ้าของ board
+				canUpdate = true
+				isBoardUser = false
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board membership"})
 				return
 			}
-
-			if count > 0 {
-				canUpdate = true
-			}
+		} else {
+			// เป็นสมาชิกของ board
+			canUpdate = true
+			isBoardUser = true
 		}
 	}
 
 	if !canUpdate {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: You don't have permission to update this task"})
 		return
 	}
 
@@ -103,17 +110,29 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 
 	// ตรวจสอบและเพิ่มฟิลด์ที่จะอัปเดท
 	if strings.TrimSpace(taskreq.TaskName) != "" {
-		updates["task_name"] = strings.TrimSpace(taskreq.TaskName)
+		taskName := strings.TrimSpace(taskreq.TaskName)
+		if len(taskName) > 255 { // เพิ่ม validation
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Task name is too long (max 255 characters)"})
+			return
+		}
+		updates["task_name"] = taskName
 	}
 
 	if strings.TrimSpace(taskreq.Description) != "" {
-		updates["description"] = strings.TrimSpace(taskreq.Description)
+		description := strings.TrimSpace(taskreq.Description)
+		if len(description) > 2000 { // เพิ่ม validation
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Description is too long (max 2000 characters)"})
+			return
+		}
+		updates["description"] = description
 	}
 
 	if strings.TrimSpace(taskreq.Priority) != "" {
-		priority := strings.TrimSpace(taskreq.Priority)
+		priorityStr := strings.TrimSpace(taskreq.Priority)
 		// ตรวจสอบว่า priority ถูกต้องหรือไม่ (1, 2, 3)
-		if priority == "1" || priority == "2" || priority == "3" {
+		if priorityStr == "1" || priorityStr == "2" || priorityStr == "3" {
+			// แปลงเป็น int เพื่อเก็บใน database
+			priority, _ := strconv.Atoi(priorityStr)
 			updates["priority"] = priority
 		} else {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Priority must be 1, 2, or 3"})
@@ -127,7 +146,50 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return
 	}
 
-	// อัปเดทข้อมูลด้วย Transaction
+	// สำหรับ Firestore rollback
+	var firestoreDocRef *firestore.DocumentRef
+	var firestoreOriginalData map[string]interface{}
+	var firestoreUpdated bool = false
+
+	// อัปเดท Firestore ก่อน (เฉพาะเมื่อเป็น board_user และมี board_id)
+	if task.BoardID != nil && isBoardUser {
+		// เตรียมข้อมูลสำหรับ Firestore
+		firestoreUpdates := []firestore.Update{}
+		for key, value := range updates {
+			// ไม่ส่ง updated_at ไป Firestore เพราะ Firestore มี timestamp เป็นของตัวเอง
+			if key != "updated_at" {
+				firestoreUpdates = append(firestoreUpdates, firestore.Update{
+					Path:  key,
+					Value: value,
+				})
+			}
+		}
+
+		if len(firestoreUpdates) > 0 {
+			firestoreDocRef = firestoreClient.Collection("Boards").Doc(fmt.Sprintf("%d", *task.BoardID)).
+				Collection("Tasks").Doc(fmt.Sprintf("%d", taskID))
+
+			// ดึงข้อมูลเดิมจาก Firestore เพื่อใช้ในการ rollback
+			docSnap, err := firestoreDocRef.Get(c)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get original Firestore data"})
+				return
+			}
+			if docSnap.Exists() {
+				firestoreOriginalData = docSnap.Data()
+			}
+
+			// อัปเดท Firestore
+			_, err = firestoreDocRef.Update(c, firestoreUpdates)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task in Firestore"})
+				return
+			}
+			firestoreUpdated = true
+		}
+	}
+
+	// อัปเดทข้อมูลใน Database ด้วย Transaction
 	err = db.Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&model.Tasks{}).
 			Where("task_id = ?", taskID).
@@ -144,7 +206,35 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return nil
 	})
 
+	// หาก Database update ล้มเหลว และได้อัปเดท Firestore แล้ว ให้ rollback Firestore
 	if err != nil {
+		if firestoreUpdated && firestoreDocRef != nil {
+			// Rollback Firestore
+			if firestoreOriginalData != nil {
+				// สร้าง updates สำหรับ rollback
+				rollbackUpdates := []firestore.Update{}
+				for key := range updates {
+					if key != "updated_at" {
+						if originalValue, exists := firestoreOriginalData[key]; exists {
+							rollbackUpdates = append(rollbackUpdates, firestore.Update{
+								Path:  key,
+								Value: originalValue,
+							})
+						}
+					}
+				}
+
+				if len(rollbackUpdates) > 0 {
+					_, rollbackErr := firestoreDocRef.Update(c, rollbackUpdates)
+					if rollbackErr != nil {
+						// Log rollback error
+						fmt.Printf("Failed to rollback Firestore for task %d: %v", taskID, rollbackErr)
+					}
+				}
+			}
+		}
+
+		// ส่ง error response
 		if err == gorm.ErrRecordNotFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Task not found or no changes made"})
 		} else {
@@ -158,17 +248,19 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 	if err := db.Where("task_id = ?", taskID).First(&updatedTask).Error; err != nil {
 		// ถ้าดึงข้อมูลไม่ได้ ก็ส่ง response สำเร็จแต่ไม่มีข้อมูล task
 		c.JSON(http.StatusOK, gin.H{
-			"message":       "Task updated successfully",
-			"taskId":        taskID,
-			"updatedFields": getUpdatedFieldNames(updates),
+			"message":          "Task updated successfully",
+			"taskId":           taskID,
+			"updatedFields":    getUpdatedFieldNames(updates),
+			"firestoreUpdated": firestoreUpdated,
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":       "Task updated successfully",
-		"task":          updatedTask,
-		"updatedFields": getUpdatedFieldNames(updates),
+		"message":          "Task updated successfully",
+		"task":             updatedTask,
+		"updatedFields":    getUpdatedFieldNames(updates),
+		"firestoreUpdated": firestoreUpdated,
 	})
 }
 
@@ -183,6 +275,9 @@ func getUpdatedFieldNames(updates map[string]interface{}) []string {
 			fields = append(fields, "Description")
 		case "priority":
 			fields = append(fields, "Priority")
+		case "updated_at":
+			// ไม่ต้องแสดง updated_at
+			continue
 		}
 	}
 	return fields

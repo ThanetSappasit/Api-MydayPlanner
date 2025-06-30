@@ -2,6 +2,7 @@ package attachments
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
@@ -29,15 +30,8 @@ func AttachmentsController(router *gin.Engine, db *gorm.DB, firestoreClient *fir
 
 func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userID := c.MustGet("userId").(uint)
-	ctx := context.Background()
-
 	taskIDStr := c.Param("taskid")
-	if taskIDStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Task ID is required"})
-		return
-	}
 
-	// แปลง string ID เป็น int
 	taskID, err := strconv.Atoi(taskIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
@@ -50,14 +44,12 @@ func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		return
 	}
 
-	// ===================
 	// ดึงข้อมูล task
 	var task struct {
 		TaskID   int  `db:"task_id"`
 		BoardID  *int `db:"board_id"`
 		CreateBy *int `db:"create_by"`
 	}
-
 	if err := db.Table("tasks").
 		Select("task_id, board_id, create_by").
 		Where("task_id = ?", taskID).
@@ -71,48 +63,49 @@ func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 	}
 
 	// ตรวจสอบสิทธิ์
-	canCreate := false
+	hasPermission := false
+	shouldSaveToFirestore := false
 
 	if task.BoardID == nil {
-		// Task ไม่มี board_id - ตรวจสอบ create_by
-		if task.CreateBy != nil && *task.CreateBy == int(userID) {
-			canCreate = true
-		}
-	} else {
-		// Task มี board_id - ตรวจสอบสิทธิ์แบบ 2 เงื่อนไข
-		// 1. ถ้าเป็นคนสร้าง task (create_by = user_id)
-		if task.CreateBy != nil && *task.CreateBy == int(userID) {
-			canCreate = true
+		// ถ้า task ไม่มี board_id แสดงว่าเป็น task ส่วนตัวของ user นี้
+		if task.CreateBy != nil && uint(*task.CreateBy) == userID {
+			hasPermission = true
+			shouldSaveToFirestore = false // ไม่ต้องบันทึกลง Firestore เพราะไม่ใช่ board member
 		} else {
-			// 2. ถ้าเป็นสมาชิกของ board (ผ่าน board_user)
-			var count int64
-			query := `
-				SELECT COUNT(1)
-				FROM tasks t
-				JOIN board_user bu ON t.board_id = bu.board_id
-				WHERE t.task_id = ? AND bu.user_id = ?
-			`
-
-			if err := db.Raw(query, taskID, userID).Count(&count).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
-				return
-			}
-
-			if count > 0 {
-				canCreate = true
+			var boardUser model.BoardUser
+			if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userID).First(&boardUser).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					// ไม่ใช่ board member ตรวจว่าเป็น board owner หรือเปล่า
+					var board model.Board
+					if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userID).First(&board).Error; err != nil {
+						if errors.Is(err, gorm.ErrRecordNotFound) {
+							c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or owner"})
+						} else {
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
+						}
+						return
+					}
+					hasPermission = true
+					shouldSaveToFirestore = false
+				} else {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
+					return
+				}
+			} else {
+				// เป็นสมาชิกบอร์ด
+				hasPermission = true
+				shouldSaveToFirestore = true
 			}
 		}
 	}
 
-	if !canCreate {
+	if !hasPermission {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 		return
 	}
 
-	// Create attachment record
+	// สร้าง record ใน database
 	var attachment model.Attachment
-
-	// Start transaction
 	err = db.Transaction(func(tx *gorm.DB) error {
 		attachment = model.Attachment{
 			TasksID:  taskID,
@@ -122,7 +115,6 @@ func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 			UploadAt: time.Now(),
 		}
 
-		// Save to SQL database
 		if err := tx.Create(&attachment).Error; err != nil {
 			return err
 		}
@@ -135,25 +127,13 @@ func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		return
 	}
 
-	// ✅ ตรวจสอบสมาชิก board และส่งข้อมูลไป Firestore ถ้ามีสมาชิก
-	if task.BoardID != nil {
-		var count int64
-		err := db.Model(&model.BoardUser{}).
-			Where("board_id = ?", *task.BoardID).
-			Count(&count).Error
+	// บันทึกลง Firestore ถ้าเป็น board member
+	if shouldSaveToFirestore {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error while verifying board users"})
-			return
-		}
-
-		if count == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "No board users found for this board"})
-			return
-		}
-
-		// ✅ ถ้ามีสมาชิกในบอร์ด ให้บันทึกลง Firestore
-		_, err = firestoreClient.Collection("Attachments").Doc(strconv.Itoa(int(attachment.AttachmentID))).Set(ctx, map[string]interface{}{
+		docID := strconv.Itoa(int(attachment.AttachmentID))
+		_, err := firestoreClient.Collection("Attachments").Doc(docID).Set(ctx, map[string]interface{}{
 			"attachment_id": attachment.AttachmentID,
 			"tasks_id":      attachment.TasksID,
 			"file_name":     attachment.FileName,
@@ -163,8 +143,7 @@ func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		})
 
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save checklist to Firestore"})
-			return
+			fmt.Printf("⚠️ Failed to save attachment %s to Firestore: %v\n", docID, err)
 		}
 	}
 
@@ -204,12 +183,12 @@ func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 	// ตรวจสอบว่า attachment นี้เป็นของ task ที่ระบุหรือไม่
 	var existingAttachment struct {
 		AttachmentID int `db:"attachment_id"`
-		TasksID      int `db:"tasks_id"` // แก้ไขให้ตรงกับ model
+		TasksID      int `db:"tasks_id"`
 	}
 
 	if err := db.Table("attachments").
 		Select("attachment_id, tasks_id").
-		Where("attachment_id = ? AND tasks_id = ?", attachmentIDInt, taskID). // แก้ไขให้ตรงกับ model
+		Where("attachment_id = ? AND tasks_id = ?", attachmentIDInt, taskID).
 		First(&existingAttachment).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Attachment not found or not belong to specified task"})
@@ -219,7 +198,7 @@ func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		return
 	}
 
-	// ตรวจสอบสิทธิ์ในการเข้าถึง task
+	// ดึงข้อมูล task
 	var task struct {
 		TaskID   int  `db:"task_id"`
 		BoardID  *int `db:"board_id"`
@@ -238,41 +217,43 @@ func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		return
 	}
 
-	// ตรวจสอบสิทธิ์
-	canDelete := false
+	// ตรวจสอบสิทธิ์แบบเดียวกับฟังก์ชันอื่น
+	hasPermission := false
+	shouldDeleteFromFirestore := false
 
 	if task.BoardID == nil {
-		// Task ไม่มี board_id - ตรวจสอบ create_by
-		if task.CreateBy != nil && *task.CreateBy == int(userID) {
-			canDelete = true
-		}
-	} else {
-		// Task มี board_id - ตรวจสอบสิทธิ์แบบ 2 เงื่อนไข
-		// 1. ถ้าเป็นคนสร้าง task (create_by = user_id)
-		if task.CreateBy != nil && *task.CreateBy == int(userID) {
-			canDelete = true
+		// ถ้า task ไม่มี board_id แสดงว่าเป็น task ส่วนตัวของ user นี้
+		if task.CreateBy != nil && uint(*task.CreateBy) == userID {
+			hasPermission = true
+			shouldDeleteFromFirestore = false // ไม่ต้องบันทึกลง Firestore เพราะไม่ใช่ board member
 		} else {
-			// 2. ถ้าเป็นสมาชิกของ board (ผ่าน board_user)
-			var count int64
-			query := `
-				SELECT COUNT(1)
-				FROM tasks t
-				JOIN board_user bu ON t.board_id = bu.board_id
-				WHERE t.task_id = ? AND bu.user_id = ?
-			`
-
-			if err := db.Raw(query, taskID, userID).Count(&count).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
-				return
-			}
-
-			if count > 0 {
-				canDelete = true
+			var boardUser model.BoardUser
+			if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userID).First(&boardUser).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					// ไม่ใช่ board member → ตรวจว่าเป็นเจ้าของ board หรือไม่
+					var board model.Board
+					if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userID).First(&board).Error; err != nil {
+						if errors.Is(err, gorm.ErrRecordNotFound) {
+							c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or board owner"})
+						} else {
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
+						}
+						return
+					}
+					hasPermission = true
+					shouldDeleteFromFirestore = false
+				} else {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
+					return
+				}
+			} else {
+				hasPermission = true
+				shouldDeleteFromFirestore = true
 			}
 		}
 	}
 
-	if !canDelete {
+	if !hasPermission {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 		return
 	}
@@ -283,12 +264,9 @@ func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		if result.Error != nil {
 			return result.Error
 		}
-
-		// ตรวจสอบว่าลบได้จริงหรือไม่
 		if result.RowsAffected == 0 {
 			return fmt.Errorf("attachment not found or already deleted")
 		}
-
 		return nil
 	})
 
@@ -297,28 +275,23 @@ func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		return
 	}
 
-	// ✅ ลบ checklist จาก Firestore ถ้ามีสมาชิกในบอร์ด
-	if task.BoardID != nil {
-		var boardUserCount int64
-		if err := db.Model(&model.BoardUser{}).
-			Where("board_id = ?", *task.BoardID).
-			Count(&boardUserCount).Error; err != nil {
-			fmt.Printf("⚠️ Failed to check board users for Firestore deletion: %v", err)
-		} else if boardUserCount > 0 {
-			ctx := context.Background() // หรือใช้ ctx จาก `c.Request.Context()` ก็ได้
+	// ✅ ลบจาก Firestore ถ้าเป็นสมาชิกบอร์ด
+	if shouldDeleteFromFirestore {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-			// ลบ attachment จาก Firestore collection "Attachments"
-			_, err := firestoreClient.Collection("Attachments").Doc(strconv.Itoa(attachmentIDInt)).Delete(ctx)
-			if err != nil {
-				fmt.Printf("⚠️ Failed to delete attachment from Firestore: %v\n", err)
-			}
+		_, err := firestoreClient.Collection("Attachments").
+			Doc(strconv.Itoa(attachmentIDInt)).
+			Delete(ctx)
 
+		if err != nil {
+			fmt.Printf("⚠️ Failed to delete attachment from Firestore: %v\n", err)
 		}
 	}
 
-	// แก้ไข response message
+	// ตอบกลับ
 	c.JSON(http.StatusOK, gin.H{
-		"message":       "Attachment deleted successfully", // แก้ไขจาก "Checklist deleted successfully"
+		"message":       "Attachment deleted successfully",
 		"attachment_id": attachmentIDInt,
 	})
 }

@@ -2,12 +2,14 @@ package checklist
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
 	"strconv"
+	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
@@ -27,7 +29,6 @@ func DeleteChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 	userID := c.MustGet("userId").(uint)
 	taskIDStr := c.Param("taskid")
 
-	// แปลง taskID เป็น int
 	taskID, err := strconv.Atoi(taskIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
@@ -41,40 +42,30 @@ func DeleteChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 	}
 
 	checklistIDs := req.ChecklistIDs
-
-	// ตรวจสอบว่ามี checklist IDs หรือไม่
 	if len(checklistIDs) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No checklist IDs provided"})
 		return
 	}
 
-	// ดึงข้อมูล checklists พร้อมตรวจสอบว่าเป็นของ task ที่ระบุหรือไม่
-	var existingChecklists []struct {
-		ChecklistID int `db:"checklist_id"`
-		TaskID      int `db:"task_id"`
-	}
-
-	if err := db.Table("checklists").
-		Select("checklist_id, task_id").
+	// ตรวจสอบว่า checklist เหล่านี้อยู่ใน task ที่ระบุ
+	var existingChecklists []model.Checklist
+	if err := db.
 		Where("checklist_id IN ? AND task_id = ?", checklistIDs, taskID).
 		Find(&existingChecklists).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch checklists"})
 		return
 	}
-
-	// ตรวจสอบว่าพบ checklists ทั้งหมดที่ร้องขอหรือไม่
 	if len(existingChecklists) != len(checklistIDs) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Some checklists not found or not belong to specified task"})
 		return
 	}
 
-	// ตรวจสอบสิทธิ์ในการเข้าถึง task
+	// ตรวจสอบ task
 	var task struct {
 		TaskID   int  `db:"task_id"`
 		BoardID  *int `db:"board_id"`
 		CreateBy *int `db:"create_by"`
 	}
-
 	if err := db.Table("tasks").
 		Select("task_id, board_id, create_by").
 		Where("task_id = ?", taskID).
@@ -87,63 +78,56 @@ func DeleteChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 		return
 	}
 
-	// ตรวจสอบสิทธิ์
-	canDelete := false
+	// ตรวจสอบสิทธิ์แบบเดียวกับฝั่ง create
+	hasPermission := false
+	shouldDeleteFromFirestore := false
 
 	if task.BoardID == nil {
-		// Task ไม่มี board_id - ตรวจสอบ create_by
-		if task.CreateBy != nil && *task.CreateBy == int(userID) {
-			canDelete = true
-		}
-	} else {
-		// Task มี board_id - ตรวจสอบสิทธิ์แบบ 2 เงื่อนไข
-		// 1. ถ้าเป็นคนสร้าง task (create_by = user_id)
-		if task.CreateBy != nil && *task.CreateBy == int(userID) {
-			canDelete = true
+		// ถ้า task ไม่มี board_id แสดงว่าเป็น task ส่วนตัวของ user นี้
+		if task.CreateBy != nil && uint(*task.CreateBy) == userID {
+			hasPermission = true
+			shouldDeleteFromFirestore = false // ไม่ต้องบันทึกลง Firestore เพราะไม่ใช่ board member
 		} else {
-			// 2. ถ้าเป็นสมาชิกของ board (ผ่าน board_user)
-			var count int64
-			query := `
-				SELECT COUNT(1)
-				FROM tasks t
-				JOIN board_user bu ON t.board_id = bu.board_id
-				WHERE t.task_id = ? AND bu.user_id = ?
-			`
-
-			if err := db.Raw(query, taskID, userID).Count(&count).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
-				return
-			}
-
-			if count > 0 {
-				canDelete = true
+			var boardUser model.BoardUser
+			if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userID).First(&boardUser).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					var board model.Board
+					if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userID).First(&board).Error; err != nil {
+						if errors.Is(err, gorm.ErrRecordNotFound) {
+							c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or owner"})
+						} else {
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
+						}
+						return
+					}
+					hasPermission = true
+					shouldDeleteFromFirestore = false
+				} else {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
+					return
+				}
+			} else {
+				hasPermission = true
+				shouldDeleteFromFirestore = true
 			}
 		}
+
 	}
 
-	if !canDelete {
+	if !hasPermission {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 		return
 	}
 
-	// เก็บ checklist IDs ที่สามารถลบได้
-	var deletableChecklistIDs []int
-	for _, checklist := range existingChecklists {
-		deletableChecklistIDs = append(deletableChecklistIDs, checklist.ChecklistID)
-	}
-
-	// ลบ checklists ด้วย Transaction
+	// ลบ checklists
 	err = db.Transaction(func(tx *gorm.DB) error {
-		result := tx.Where("checklist_id IN ?", deletableChecklistIDs).Delete(&model.Checklist{})
+		result := tx.Where("checklist_id IN ?", checklistIDs).Delete(&model.Checklist{})
 		if result.Error != nil {
 			return result.Error
 		}
-
-		// ตรวจสอบว่าลบได้จริงหรือไม่
-		if result.RowsAffected != int64(len(deletableChecklistIDs)) {
-			return fmt.Errorf("expected to delete %d checklists, but deleted %d", len(deletableChecklistIDs), result.RowsAffected)
+		if result.RowsAffected != int64(len(checklistIDs)) {
+			return fmt.Errorf("expected to delete %d, but deleted %d", len(checklistIDs), result.RowsAffected)
 		}
-
 		return nil
 	})
 
@@ -152,30 +136,24 @@ func DeleteChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 		return
 	}
 
-	// ✅ ลบ checklist จาก Firestore ถ้ามีสมาชิกในบอร์ด
-	if task.BoardID != nil {
-		var boardUserCount int64
-		if err := db.Model(&model.BoardUser{}).
-			Where("board_id = ?", *task.BoardID).
-			Count(&boardUserCount).Error; err != nil {
-			fmt.Printf("⚠️ Failed to check board users for Firestore deletion: %v", err)
-		} else if boardUserCount > 0 {
-			ctx := context.Background() // หรือใช้ ctx จาก `c.Request.Context()` ก็ได้
+	// ลบจาก Firestore (ถ้าเป็นสมาชิกบอร์ด)
+	if shouldDeleteFromFirestore {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-			for _, checklistID := range deletableChecklistIDs {
-				docID := strconv.Itoa(checklistID)
-				_, err := firestoreClient.Collection("Checklist").Doc(docID).Delete(ctx)
-				if err != nil {
-					fmt.Printf("⚠️ Failed to delete checklist %s from Firestore: %v", docID, err)
-				}
+		for _, checklist := range existingChecklists {
+			docID := strconv.Itoa(int(checklist.ChecklistID))
+			_, err := firestoreClient.Collection("Checklist").Doc(docID).Delete(ctx)
+			if err != nil {
+				fmt.Printf("⚠️ Failed to delete checklist %s from Firestore: %v\n", docID, err)
 			}
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":           fmt.Sprintf("%d checklists deleted successfully", len(deletableChecklistIDs)),
-		"deletedCount":      len(deletableChecklistIDs),
-		"deletedChecklists": deletableChecklistIDs,
+		"message":           fmt.Sprintf("%d checklists deleted successfully", len(checklistIDs)),
+		"deletedCount":      len(checklistIDs),
+		"deletedChecklists": checklistIDs,
 	})
 }
 

@@ -2,6 +2,8 @@ package checklist
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
@@ -21,7 +23,6 @@ func CreateChecklistController(router *gin.Engine, db *gorm.DB, firestoreClient 
 }
 
 func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-	ctx := context.Background()
 	userId := c.MustGet("userId").(uint)
 
 	taskIDStr := c.Param("taskid")
@@ -39,6 +40,16 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	var req dto.CreateChecklistTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	var user model.User
+	if err := db.Where("user_id = ?", userId).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user"})
+		}
 		return
 	}
 
@@ -60,96 +71,110 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		return
 	}
 
-	canDelete := false
+	// ตรวจสอบสิทธิ์การเข้าถึง board และ permission ในการบันทึก Firestore
+	var shouldSaveToFirestore = false
+	var hasPermission = false
 
 	if task.BoardID == nil {
-		if task.CreateBy != nil && *task.CreateBy == int(userId) {
-			canDelete = true
-		}
-	} else {
-		if task.CreateBy != nil && *task.CreateBy == int(userId) {
-			canDelete = true
+		// ถ้า task ไม่มี board_id แสดงว่าเป็น task ส่วนตัวของ user นี้
+		if task.CreateBy != nil && uint(*task.CreateBy) == userId {
+			hasPermission = true
+			shouldSaveToFirestore = false // ไม่ต้องบันทึกลง Firestore เพราะไม่ใช่ board member
 		} else {
-			var count int64
-			query := `
-				SELECT COUNT(1)
-				FROM tasks t
-				JOIN board_user bu ON t.board_id = bu.board_id
-				WHERE t.task_id = ? AND bu.user_id = ?
-			`
-
-			if err := db.Raw(query, taskID, userId).Count(&count).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board access"})
-				return
-			}
-
-			if count > 0 {
-				canDelete = true
+			// ตรวจสอบว่าเป็น board member หรือ board owner
+			var boardUser model.BoardUser
+			if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userId).First(&boardUser).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					// ไม่เป็น board member ตรวจสอบว่าเป็น board owner หรือไม่
+					var board model.Board
+					if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userId).First(&board).Error; err != nil {
+						if errors.Is(err, gorm.ErrRecordNotFound) {
+							c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or board owner"})
+						} else {
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
+						}
+						return
+					}
+					// เป็น board owner แต่ไม่ต้องบันทึก Firestore
+					hasPermission = true
+					shouldSaveToFirestore = false
+				} else {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
+					return
+				}
+			} else {
+				// เป็น board member ให้บันทึก Firestore ด้วย
+				hasPermission = true
+				shouldSaveToFirestore = true
 			}
 		}
 	}
 
-	if !canDelete {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+	// เริ่ม transaction
+	tx := db.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
 		return
 	}
-
-	var checklist model.Checklist
-
-	err = db.Transaction(func(tx *gorm.DB) error {
-		checklist = model.Checklist{
-			TaskID:        taskID,
-			ChecklistName: req.ChecklistName,
-			Status:        "0",
-			CreateAt:      time.Now(),
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
 		}
+	}()
 
-		if err := tx.Create(&checklist).Error; err != nil {
-			return err
-		}
+	newChecklist := model.Checklist{
+		TaskID:        taskID,
+		ChecklistName: req.ChecklistName,
+		Status:        "0",
+		CreateAt:      time.Now(),
+	}
 
-		return nil
-	})
-
-	if err != nil {
+	if err := tx.Create(&newChecklist).Error; err != nil {
+		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create checklist"})
 		return
 	}
 
-	// ✅ ตรวจสอบสมาชิก board และส่งข้อมูลไป Firestore ถ้ามีสมาชิก
-	if task.BoardID != nil {
-		var count int64
-		err := db.Model(&model.BoardUser{}).
-			Where("board_id = ?", *task.BoardID).
-			Count(&count).Error
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+		return
+	}
 
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error while verifying board users"})
-			return
-		}
+	// บันทึกลง Firestore (หลัง database commit สำเร็จ) - เฉพาะเมื่อเป็น board member
+	if shouldSaveToFirestore && hasPermission {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-		if count == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "No board users found for this board"})
-			return
-		}
-
-		// ✅ ถ้ามีสมาชิกในบอร์ด ให้บันทึกลง Firestore
-		_, err = firestoreClient.Collection("Checklist").Doc(strconv.Itoa(int(checklist.ChecklistID))).Set(ctx, map[string]interface{}{
-			"checklist_id":   checklist.ChecklistID,
-			"task_id":        checklist.TaskID,
-			"checklist_name": checklist.ChecklistName,
-			"status":         checklist.Status,
-			"create_at":      checklist.CreateAt,
-		})
-
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save checklist to Firestore"})
-			return
+		checklistIDInt := int(newChecklist.ChecklistID)
+		if err := saveTaskToFirestore(ctx, firestoreClient, &newChecklist, checklistIDInt); err != nil {
+			// Log error แต่ไม่ return เพราะ database บันทึกสำเร็จแล้ว
+			// ควรใช้ proper logging system
+			fmt.Printf("Warning: Failed to save checklist to Firestore: %v\n", err)
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":      "Checklist created successfully",
-		"checklist_id": checklist.ChecklistID,
-	})
+	// สร้าง response
+	response := gin.H{
+		"message":     "Checklist created successfully",
+		"checklistID": newChecklist.ChecklistID,
+	}
+
+	c.JSON(http.StatusCreated, response)
+}
+
+func saveTaskToFirestore(ctx context.Context, client *firestore.Client, checklist *model.Checklist, ChecklistID int) error {
+	taskPath := fmt.Sprintf("Checklist/%d", ChecklistID)
+
+	taskData := map[string]interface{}{
+		"checklist_id":   checklist.ChecklistID,
+		"task_id":        checklist.TaskID,
+		"checklist_name": checklist.ChecklistName,
+		"status":         checklist.Status,
+		"create_at":      checklist.CreateAt,
+	}
+
+	_, err := client.Doc(taskPath).Set(ctx, taskData)
+	return err
 }
