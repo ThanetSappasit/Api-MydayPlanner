@@ -76,37 +76,40 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	var hasPermission = false
 
 	if task.BoardID == nil {
-		// ถ้า task ไม่มี board_id แสดงว่าเป็น task ส่วนตัวของ user นี้
+		// Task ส่วนตัว: ต้องสร้างเองเท่านั้นถึงจะเข้าถึงได้
 		if task.CreateBy != nil && uint(*task.CreateBy) == userId {
 			hasPermission = true
-			shouldSaveToFirestore = false // ไม่ต้องบันทึกลง Firestore เพราะไม่ใช่ board member
+			shouldSaveToFirestore = false // Task ส่วนตัว ไม่ sync Firestore
 		} else {
-			// ตรวจสอบว่าเป็น board member หรือ board owner
-			var boardUser model.BoardUser
-			if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userId).First(&boardUser).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					// ไม่เป็น board member ตรวจสอบว่าเป็น board owner หรือไม่
-					var board model.Board
-					if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userId).First(&board).Error; err != nil {
-						if errors.Is(err, gorm.ErrRecordNotFound) {
-							c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or board owner"})
-						} else {
-							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
-						}
-						return
+			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not the owner of this personal task"})
+			return
+		}
+	} else {
+		// ถ้ามี BoardID ⇒ ตรวจสอบว่าเป็นสมาชิกบอร์ดหรือเจ้าของบอร์ด
+		var boardUser model.BoardUser
+		if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userId).First(&boardUser).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// ไม่พบใน BoardUser ⇒ ตรวจสอบว่าเป็นเจ้าของบอร์ดไหม
+				var board model.Board
+				if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userId).First(&board).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or board owner"})
+					} else {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
 					}
-					// เป็น board owner แต่ไม่ต้องบันทึก Firestore
-					hasPermission = true
-					shouldSaveToFirestore = false
-				} else {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
 					return
 				}
-			} else {
-				// เป็น board member ให้บันทึก Firestore ด้วย
+				// เป็นเจ้าของบอร์ด
 				hasPermission = true
-				shouldSaveToFirestore = true
+				shouldSaveToFirestore = false
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
+				return
 			}
+		} else {
+			// เป็นสมาชิกบอร์ด
+			hasPermission = true
+			shouldSaveToFirestore = true
 		}
 	}
 
