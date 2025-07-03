@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -15,168 +17,334 @@ import (
 	"gorm.io/gorm"
 )
 
+// TaskService encapsulates task-related business logic
+type TaskService struct {
+	db              *gorm.DB
+	firestoreClient *firestore.Client
+}
+
+// NewTaskService creates a new TaskService instance
+func NewTaskService(db *gorm.DB, firestoreClient *firestore.Client) *TaskService {
+	return &TaskService{
+		db:              db,
+		firestoreClient: firestoreClient,
+	}
+}
+
 func CreateTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	router.POST("/task", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-		CreateTask(c, db, firestoreClient)
-	})
+	service := NewTaskService(db, firestoreClient)
+	router.POST("/task", middleware.AccessTokenMiddleware(), service.CreateTaskHandler)
 }
 
 func TodayTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
+	service := NewTaskService(db, firestoreClient)
 	routes := router.Group("/todaytasks", middleware.AccessTokenMiddleware())
 	{
-		routes.POST("/create", func(c *gin.Context) {
-			CreateTodayTask(c, db, firestoreClient)
-		})
+		routes.POST("/create", service.CreateTodayTaskHandler)
 	}
 }
 
-func CreateTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+// CreateTask with board
+func (s *TaskService) CreateTaskHandler(c *gin.Context) {
 	userId := c.MustGet("userId").(uint)
-	var task dto.CreateTaskRequest
-	if err := c.ShouldBindJSON(&task); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input", "details": err.Error()})
+
+	var taskReq dto.CreateTaskRequest
+	if err := c.ShouldBindJSON(&taskReq); err != nil {
+		respondWithError(c, http.StatusBadRequest, "Invalid input", err)
 		return
 	}
 
-	// ตรวจสอบ user และ board user พร้อมกัน
-	var user model.User
-	if err := db.Where("user_id = ?", userId).First(&user).Error; err != nil {
+	// ดึงข้อมูลผู้ใช้
+	user, err := s.getUserByID(userId)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			respondWithError(c, http.StatusNotFound, "User not found", nil)
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user"})
+			respondWithError(c, http.StatusInternalServerError, "Failed to fetch user", err)
 		}
 		return
 	}
 
-	var shouldSaveToFirestore = false
-	var boardUser model.BoardUser
-	if err := db.Where("board_id = ?", task.BoardID).First(&boardUser).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// ตรวจสอบว่า user เป็นเจ้าของบอร์ดหรือไม่
-			var board model.Board
-			if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userId).First(&board).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					c.JSON(http.StatusNotFound, gin.H{"error": "Access denied: not a board member or board owner"})
-				} else {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
-				}
-				return
-			}
-			// ถ้าเจอบอร์ดที่ userId เป็นคนสร้าง ไม่ต้องบันทึก Firebase
-			shouldSaveToFirestore = false
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
-			return
-		}
-	} else {
-		// เจอ boardUser แล้ว ให้บันทึก Firebase ด้วย
-		shouldSaveToFirestore = true
-	}
-
-	// เริ่ม transaction
-	tx := db.Begin()
-	if tx.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
-		return
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	// สร้าง task
-	newTask := model.Tasks{
-		BoardID:     &task.BoardID,
-		TaskName:    task.TaskName,
-		Description: stringToPtr(task.Description),
-		Status:      task.Status,
-		Priority:    stringToPtr(task.Priority),
-		CreateBy:    intToPtr(user.UserID),
-		CreateAt:    time.Now(),
-	}
-
-	if err := tx.Create(&newTask).Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create task"})
+	// ตรวจสอบว่าอยู่บอร์ดกลุ่มหรือไม่
+	shouldSaveToFirestore, err := s.validateBoardAccess(taskReq.BoardID, userId)
+	if err != nil {
+		respondWithError(c, http.StatusForbidden, "Access denied: not a board member or board owner", err)
 		return
 	}
 
-	// จัดการ notification
-	var notification model.Notification
-	var hasNotification bool
-
-	if task.Reminder != nil {
-		hasNotification = true
-
-		parsedDueDate, err := parseDateTime(task.Reminder.DueDate)
-		if err != nil {
-			tx.Rollback()
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid DueDate format. Supported formats: '2006-01-02 15:04:05.999999', '2006-01-02 15:04:05', or RFC3339",
-			})
-			return
-		}
-
-		notification = model.Notification{
-			TaskID:           newTask.TaskID,
-			DueDate:          parsedDueDate,
-			RecurringPattern: task.Reminder.RecurringPattern,
-			IsSend:           false,
-			CreatedAt:        time.Now(),
-		}
-
-		if err := tx.Create(&notification).Error; err != nil {
-			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create notification"})
-			return
-		}
-	}
-
-	// Commit transaction
-	if err := tx.Commit().Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+	// สร้างงาน
+	task, notification, err := s.createTaskWithTransaction(&taskReq, user)
+	if err != nil {
+		respondWithError(c, http.StatusInternalServerError, "Failed to create task", err)
 		return
 	}
 
-	// บันทึกลง Firestore (หลัง database commit สำเร็จ) - เฉพาะเมื่อเจอ boardUser เท่านั้น
-	if shouldSaveToFirestore {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+	// สร้างการแจ้งเตือนใน Firestore
+	go s.handleFirestoreOperations(task, notification, user.Email, shouldSaveToFirestore)
 
-		boardIDInt := int(task.BoardID)
-		// บันทึก task ลง Firestore
-		if err := saveTaskToFirestore(ctx, firestoreClient, &newTask, boardIDInt); err != nil {
-			// Log error แต่ไม่ return เพราะ database บันทึกสำเร็จแล้ว
-			// ควรมี logging system ที่นี่
-			fmt.Printf("Warning: Failed to save task to Firestore: %v\n", err)
-		}
-
-		// บันทึก notification ลง Firestore ถ้ามี
-		if hasNotification {
-			if err := saveNotificationToFirestore(ctx, firestoreClient, &notification, user.Email); err != nil {
-				// Log error แต่ไม่ return
-				fmt.Printf("Warning: Failed to save notification to Firestore: %v\n", err)
-			}
-		}
-	}
-
-	// สร้าง response
+	// Prepare response
 	response := gin.H{
 		"message": "Task created successfully",
-		"taskID":  newTask.TaskID,
+		"taskID":  task.TaskID,
 	}
 
-	if hasNotification {
+	if notification != nil {
 		response["notificationID"] = notification.NotificationID
 	}
 
 	c.JSON(http.StatusCreated, response)
 }
 
-// Helper functions
+// CreateTodayTaskHandler handles today task creation (without board)
+func (s *TaskService) CreateTodayTaskHandler(c *gin.Context) {
+	userId := c.MustGet("userId").(uint)
+
+	var taskReq dto.CreateTodayTaskRequest
+	if err := c.ShouldBindJSON(&taskReq); err != nil {
+		respondWithError(c, http.StatusBadRequest, "Invalid input", err)
+		return
+	}
+
+	// Get user information
+	user, err := s.getUserByID(userId)
+	if err != nil {
+		respondWithError(c, http.StatusNotFound, "User not found", err)
+		return
+	}
+
+	// Create today task with transaction
+	task, notification, err := s.createTodayTaskWithTransaction(&taskReq, user)
+	if err != nil {
+		respondWithError(c, http.StatusInternalServerError, "Failed to create task", err)
+		return
+	}
+
+	// Handle Firestore operations (non-blocking)
+	if notification != nil {
+		go s.saveNotificationToFirestore(notification, user.Email)
+	}
+
+	// Prepare response
+	response := gin.H{
+		"message": "Task created successfully",
+		"taskID":  task.TaskID,
+	}
+
+	if notification != nil {
+		response["notificationID"] = notification.NotificationID
+	}
+
+	c.JSON(http.StatusCreated, response)
+}
+
+// getUserByID retrieves user by ID
+func (s *TaskService) getUserByID(userID uint) (*model.User, error) {
+	var user model.User
+	err := s.db.Where("user_id = ?", userID).First(&user).Error
+	return &user, err
+}
+
+// ตรวจสอบการเข้าถึงบอร์ด
+func (s *TaskService) validateBoardAccess(boardID int, userID uint) (bool, error) {
+	// Check if user is a board member
+	var boardUser model.BoardUser
+	err := s.db.Where("board_id = ?", boardID).First(&boardUser).Error
+	if err == nil {
+		return true, nil // User is board member, should save to Firestore
+	}
+
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, err // Database error
+	}
+
+	// Check if user is board owner
+	var board model.Board
+	err = s.db.Where("board_id = ? AND create_by = ?", boardID, userID).First(&board).Error
+	if err != nil {
+		return false, err // Not found or database error
+	}
+
+	return false, nil // User is board owner, don't save to Firestore
+}
+
+// สร้างงานใน sql
+func (s *TaskService) createTaskWithTransaction(taskReq *dto.CreateTaskRequest, user *model.User) (*model.Tasks, *model.Notification, error) {
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return nil, nil, tx.Error
+	}
+	defer tx.Rollback()
+
+	// Create task
+	task := &model.Tasks{
+		BoardID:     &taskReq.BoardID,
+		TaskName:    taskReq.TaskName,
+		Description: stringToPtr(taskReq.Description),
+		Status:      taskReq.Status,
+		Priority:    stringToPtr(taskReq.Priority),
+		CreateBy:    intToPtr(user.UserID),
+		CreateAt:    time.Now(),
+	}
+
+	if err := tx.Create(task).Error; err != nil {
+		return nil, nil, fmt.Errorf("failed to create task: %w", err)
+	}
+
+	// Handle notification if provided and DueDate is not empty
+	var notification *model.Notification
+	if taskReq.Reminder != nil && strings.TrimSpace(taskReq.Reminder.DueDate) != "" {
+		notif, err := s.createNotificationInTx(tx, uint(task.TaskID), taskReq.Reminder)
+		if err != nil {
+			return nil, nil, err
+		}
+		notification = notif
+	}
+
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		return nil, nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return task, notification, nil
+}
+
+// สร้างงานToday
+func (s *TaskService) createTodayTaskWithTransaction(taskReq *dto.CreateTodayTaskRequest, user *model.User) (*model.Tasks, *model.Notification, error) {
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return nil, nil, tx.Error
+	}
+	defer tx.Rollback()
+
+	// Create task
+	task := &model.Tasks{
+		BoardID:     nil, // Today tasks don't belong to a board
+		TaskName:    taskReq.TaskName,
+		Description: stringToPtr(taskReq.Description),
+		Status:      taskReq.Status,
+		Priority:    stringToPtr(taskReq.Priority),
+		CreateBy:    intToPtr(user.UserID),
+		CreateAt:    time.Now(),
+	}
+
+	if err := tx.Create(task).Error; err != nil {
+		return nil, nil, fmt.Errorf("failed to create task: %w", err)
+	}
+
+	// Handle notification only if reminder exists and DueDate is not empty
+	var notification *model.Notification
+	if taskReq.Reminder != nil && strings.TrimSpace(taskReq.Reminder.DueDate) != "" {
+		notif, err := s.createNotificationInTx(tx, uint(task.TaskID), taskReq.Reminder)
+		if err != nil {
+			return nil, nil, err
+		}
+		notification = notif
+	}
+
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		return nil, nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return task, notification, nil
+}
+
+// สร้างการแจ้งเตือนใน sql
+func (s *TaskService) createNotificationInTx(tx *gorm.DB, taskID uint, reminder *dto.Reminder) (*model.Notification, error) {
+	parsedDueDate, err := parseDateTime(reminder.DueDate)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DueDate format: %w", err)
+	}
+
+	notification := &model.Notification{
+		TaskID:           int(taskID),
+		DueDate:          parsedDueDate,
+		RecurringPattern: reminder.RecurringPattern,
+		IsSend:           parsedDueDate.Before(time.Now()),
+		CreatedAt:        time.Now(),
+	}
+
+	if err := tx.Create(notification).Error; err != nil {
+		return nil, fmt.Errorf("failed to create notification: %w", err)
+	}
+
+	return notification, nil
+}
+
+// ตรวจสอบและบันทึกการดำเนินการ Firestore
+func (s *TaskService) handleFirestoreOperations(task *model.Tasks, notification *model.Notification, userEmail string, shouldSaveTask bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Save task to Firestore if needed
+	if shouldSaveTask && task.BoardID != nil {
+		if err := s.saveTaskToFirestore(ctx, task, int(*task.BoardID)); err != nil {
+			log.Printf("Warning: Failed to save task to Firestore: %v", err)
+		}
+	}
+
+	// Save notification to Firestore if exists
+	if notification != nil {
+		if err := s.saveNotificationToFirestore(notification, userEmail); err != nil {
+			log.Printf("Warning: Failed to save notification to Firestore: %v", err)
+		}
+	}
+}
+
+// บันทึกงานใน Firestore
+func (s *TaskService) saveTaskToFirestore(ctx context.Context, task *model.Tasks, boardID int) error {
+	taskPath := fmt.Sprintf("Boards/%d/Tasks/%d", boardID, task.TaskID)
+
+	taskData := map[string]interface{}{
+		"taskID":    task.TaskID,
+		"boardID":   boardID,
+		"taskName":  task.TaskName,
+		"status":    task.Status,
+		"createAt":  task.CreateAt,
+		"updatedAt": time.Now(),
+	}
+
+	// Add optional fields safely
+	if task.Description != nil {
+		taskData["description"] = *task.Description
+	}
+	if task.Priority != nil {
+		taskData["priority"] = *task.Priority
+	}
+	if task.CreateBy != nil {
+		taskData["createBy"] = *task.CreateBy
+	}
+
+	_, err := s.firestoreClient.Doc(taskPath).Set(ctx, taskData)
+	return err
+}
+
+// บันทึกการแจ้งเตือนใน Firestore
+func (s *TaskService) saveNotificationToFirestore(notification *model.Notification, email string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	notificationPath := fmt.Sprintf("Notifications/%s/Tasks/%d", email, notification.NotificationID)
+
+	notificationData := map[string]interface{}{
+		"notificationID": notification.NotificationID,
+		"taskID":         notification.TaskID,
+		"dueDate":        notification.DueDate,
+		"isSend":         notification.IsSend,
+		"createdAt":      notification.CreatedAt,
+		"updatedAt":      time.Now(),
+	}
+
+	// Add recurring pattern if exists
+	if notification.RecurringPattern != "" {
+		notificationData["recurringPattern"] = notification.RecurringPattern
+	}
+
+	_, err := s.firestoreClient.Doc(notificationPath).Set(ctx, notificationData)
+	return err
+}
+
+// Utility functions
 func stringToPtr(s string) *string {
 	if s == "" {
 		return nil
@@ -189,7 +357,17 @@ func intToPtr(i int) *int {
 }
 
 func parseDateTime(dateStr string) (time.Time, error) {
-	// ลองรูปแบบต่างๆ ตามลำดับ
+	// ตรวจสอบ empty string ก่อน
+	if dateStr == "" {
+		return time.Time{}, fmt.Errorf("due date is required")
+	}
+
+	// ตัด whitespace ออก
+	dateStr = strings.TrimSpace(dateStr)
+	if dateStr == "" {
+		return time.Time{}, fmt.Errorf("due date cannot be empty")
+	}
+
 	formats := []string{
 		"2006-01-02 15:04:05.999999",
 		"2006-01-02 15:04:05",
@@ -207,161 +385,15 @@ func parseDateTime(dateStr string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unsupported date format: %s", dateStr)
 }
 
-func saveTaskToFirestore(ctx context.Context, client *firestore.Client, task *model.Tasks, boardID int) error {
-	taskPath := fmt.Sprintf("Boards/%d/Tasks/%d", boardID, task.TaskID)
+func respondWithError(c *gin.Context, statusCode int, message string, err error) {
+	response := gin.H{"error": message}
 
-	taskData := map[string]interface{}{
-		"taskID":    task.TaskID,
-		"boardID":   boardID,
-		"taskName":  task.TaskName,
-		"status":    task.Status,
-		"createAt":  task.CreateAt,
-		"updatedAt": time.Now(),
+	if err != nil {
+		// In development, you might want to include error details
+		// In production, log the error and return generic message
+		log.Printf("Error: %v", err)
+		response["details"] = err.Error()
 	}
 
-	// เพิ่มข้อมูลที่เป็น pointer แบบปลอดภัย
-	if task.Description != nil {
-		taskData["description"] = *task.Description
-	}
-	if task.Priority != nil {
-		taskData["priority"] = *task.Priority
-	}
-	if task.CreateBy != nil {
-		taskData["createBy"] = *task.CreateBy
-	}
-
-	_, err := client.Doc(taskPath).Set(ctx, taskData)
-	return err
-}
-
-func saveNotificationToFirestore(ctx context.Context, client *firestore.Client, notification *model.Notification, email string) error {
-	notificationPath := fmt.Sprintf("Notifications/%s/Tasks/%d", email, notification.NotificationID)
-
-	notificationData := map[string]interface{}{
-		"notificationID": notification.NotificationID,
-		"taskID":         notification.TaskID,
-		"dueDate":        notification.DueDate,
-		"isSend":         notification.IsSend,
-		"createdAt":      notification.CreatedAt,
-		"updatedAt":      time.Now(),
-	}
-
-	// เพิ่ม recurring pattern ถ้ามี
-	if notification.RecurringPattern != "" {
-		notificationData["recurringPattern"] = notification.RecurringPattern
-	}
-
-	_, err := client.Doc(notificationPath).Set(ctx, notificationData)
-	return err
-}
-
-func CreateTodayTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-	userId := c.MustGet("userId").(uint)
-	var task dto.CreateTodayTaskRequest
-	if err := c.ShouldBindJSON(&task); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input", "details": err.Error()})
-		return
-	}
-
-	var user model.User
-	if err := db.Where("user_id = ?", userId).First(&user).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-		return
-	}
-
-	tx := db.Begin()
-	if tx.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
-		return
-	}
-
-	// Helper function สำหรับแปลง string เป็น pointer
-	stringPtr := func(s string) *string {
-		if s == "" {
-			return nil
-		}
-		return &s
-	}
-
-	intPtr := func(i int) *int {
-		return &i
-	}
-
-	newTask := model.Tasks{
-		BoardID:     nil, // ตั้งค่าเป็น nil เพื่อรองรับ board null
-		TaskName:    task.TaskName,
-		Description: stringPtr(task.Description), // แปลงเป็น pointer
-		Status:      task.Status,
-		Priority:    stringPtr(task.Priority), // แปลงเป็น pointer
-		CreateBy:    intPtr(user.UserID),      // แปลงเป็น pointer
-		CreateAt:    time.Now(),
-	}
-
-	if err := tx.Create(&newTask).Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create task"})
-		return
-	}
-
-	// ประกาศตัวแปร notification นอก if block
-	var notification model.Notification
-	var hasNotification bool
-
-	// Handle reminders
-	if task.Reminder != nil {
-		hasNotification = true
-
-		// รองรับรูปแบบวันที่ที่คุณส่งมา: 2025-06-20 09:53:09.638825
-		parsedDueDate, err := time.Parse("2006-01-02 15:04:05.999999", task.Reminder.DueDate)
-		if err != nil {
-			// ถ้า parse ไม่ได้ ลองรูปแบบอื่น
-			parsedDueDate, err = time.Parse("2006-01-02 15:04:05", task.Reminder.DueDate)
-			if err != nil {
-				// ถ้ายังไม่ได้ ลอง RFC3339
-				parsedDueDate, err = time.Parse(time.RFC3339, task.Reminder.DueDate)
-				if err != nil {
-					tx.Rollback()
-					c.JSON(http.StatusBadRequest, gin.H{
-						"error": "Invalid DueDate format. Supported formats: '2006-01-02 15:04:05.999999', '2006-01-02 15:04:05', or RFC3339",
-					})
-					return
-				}
-			}
-		}
-
-		notification = model.Notification{
-			TaskID:           newTask.TaskID,
-			DueDate:          parsedDueDate,
-			RecurringPattern: task.Reminder.RecurringPattern,
-			IsSend:           false,
-			CreatedAt:        time.Now(),
-		}
-
-		// บันทึก notification ลงฐานข้อมูล
-		if err := tx.Create(&notification).Error; err != nil {
-			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create notification"})
-			return
-		}
-	}
-
-	// Commit the transaction
-	if err := tx.Commit().Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
-		return
-	}
-
-	// สร้าง response object
-	response := gin.H{
-		"message": "Task created successfully",
-		"taskID":  newTask.TaskID,
-	}
-
-	// เพิ่ม notificationID เฉพาะเมื่อมีการสร้าง notification
-	if hasNotification {
-		response["notificationID"] = notification.NotificationID // แก้ไขให้ใช้ NotificationID (Pascal case)
-	}
-
-	c.JSON(http.StatusCreated, response)
+	c.JSON(statusCode, response)
 }

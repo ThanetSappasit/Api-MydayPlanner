@@ -18,7 +18,7 @@ type CreateTodayTaskRequest struct {
 }
 
 type Reminder struct {
-	DueDate          string `json:"due_date" binding:"required"`
+	DueDate          string `json:"due_date"`
 	RecurringPattern string `json:"recurring_pattern,omitempty"`
 }
 
