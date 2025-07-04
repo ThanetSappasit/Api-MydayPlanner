@@ -62,19 +62,16 @@ func CreateNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		return
 	}
 
-	// ตรวจสอบสิทธิ์การเข้าถึง board
+	// ตรวจสอบสิทธิ์การเข้าถึง
 	if task.BoardID == nil {
-		// Task ส่วนตัว: ต้องสร้างเองเท่านั้นถึงจะเข้าถึงได้
 		if task.CreateBy == nil || uint(*task.CreateBy) != userId {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not the owner of this personal task"})
 			return
 		}
 	} else {
-		// ถ้ามี BoardID ⇒ ตรวจสอบว่าเป็นสมาชิกบอร์ดหรือเจ้าของบอร์ด
 		var boardUser model.BoardUser
 		if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userId).First(&boardUser).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				// ไม่พบใน BoardUser ⇒ ตรวจสอบว่าเป็นเจ้าของบอร์ดไหม
 				var board model.Board
 				if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userId).First(&board).Error; err != nil {
 					if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -91,23 +88,19 @@ func CreateNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		}
 	}
 
-	// Parse และ validate due date
 	parsedDueDate, err := parseDateTime(req.DueDate)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid DueDate format: %v", err)})
 		return
 	}
 
-	// ตรวจสอบว่า notification สำหรับ task นี้มีอยู่แล้วหรือไม่
 	var existingNotification model.Notification
 	err = db.Where("task_id = ?", req.TaskID).First(&existingNotification).Error
 
 	isUpdate := false
 	if err == nil {
-		// มี notification อยู่แล้ว → อัปเดท
 		isUpdate = true
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		// Error อื่นๆ ที่ไม่ใช่ "ไม่พบข้อมูล"
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing notification"})
 		return
 	}
@@ -124,10 +117,8 @@ func CreateNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 	}()
 
 	var notificationToSave model.Notification
-	var message string
 
 	if isUpdate {
-		// อัปเดท notification ที่มีอยู่
 		existingNotification.DueDate = parsedDueDate
 		existingNotification.RecurringPattern = req.RecurringPattern
 		existingNotification.IsSend = parsedDueDate.Before(time.Now())
@@ -137,11 +128,8 @@ func CreateNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
 			return
 		}
-
 		notificationToSave = existingNotification
-		message = "Notification updated successfully"
 	} else {
-		// สร้าง notification ใหม่
 		newNotification := model.Notification{
 			TaskID:           req.TaskID,
 			DueDate:          parsedDueDate,
@@ -155,29 +143,39 @@ func CreateNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create notification"})
 			return
 		}
-
 		notificationToSave = newNotification
-		message = "Notification created successfully"
 	}
 
-	// Commit transaction
 	if err := tx.Commit().Error; err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
 		return
 	}
 
-	// บันทึกลง Firestore (หลัง database commit สำเร็จ)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	notificationIDInt := int(notificationToSave.NotificationID)
 	if err := saveTaskToFirestore(ctx, firestoreClient, &notificationToSave, notificationIDInt, user.Email); err != nil {
-		// Log error แต่ไม่ return เพราะ database บันทึกสำเร็จแล้ว
 		fmt.Printf("Warning: Failed to save Notification to Firestore: %v\n", err)
 	}
 
-	c.JSON(200, gin.H{"message": message, "notification_id": notificationToSave.NotificationID})
+	statusCode := http.StatusOK
+	message := "Notification updated successfully"
+	if !isUpdate {
+		statusCode = http.StatusCreated
+		message = "Notification created successfully"
+	}
+
+	c.JSON(statusCode, gin.H{
+		"message":           message,
+		"notification_id":   notificationToSave.NotificationID,
+		"task_id":           notificationToSave.TaskID,
+		"due_date":          notificationToSave.DueDate,
+		"recurring_pattern": notificationToSave.RecurringPattern,
+		"is_send":           notificationToSave.IsSend,
+		"created_at":        notificationToSave.CreatedAt,
+	})
 }
 
 func parseDateTime(dateStr string) (time.Time, error) {
