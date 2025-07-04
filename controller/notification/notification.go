@@ -168,13 +168,13 @@ func CreateNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 	}
 
 	c.JSON(statusCode, gin.H{
-		"message":           message,
-		"notification_id":   notificationToSave.NotificationID,
-		"task_id":           notificationToSave.TaskID,
-		"due_date":          notificationToSave.DueDate,
-		"recurring_pattern": notificationToSave.RecurringPattern,
-		"is_send":           notificationToSave.IsSend,
-		"created_at":        notificationToSave.CreatedAt,
+		"message":          message,
+		"notificationID":   notificationToSave.NotificationID,
+		"taskID":           notificationToSave.TaskID,
+		"dueDate":          notificationToSave.DueDate,
+		"recurringPattern": notificationToSave.RecurringPattern,
+		"isSend":           notificationToSave.IsSend,
+		"createdAt":        notificationToSave.CreatedAt,
 	})
 }
 
@@ -211,12 +211,12 @@ func saveTaskToFirestore(ctx context.Context, client *firestore.Client, notifica
 	taskPath := fmt.Sprintf("Notifications/%s/Tasks/%d", email, notificationIDInt)
 
 	taskData := map[string]interface{}{
-		"notification_id":   notificationIDInt,
-		"task_id":           notification.TaskID,
-		"due_date":          notification.DueDate,
-		"recurring_pattern": notification.RecurringPattern,
-		"is_send":           notification.IsSend,
-		"created_at":        notification.CreatedAt,
+		"notificationID":   notificationIDInt,
+		"taskID":           notification.TaskID,
+		"dueDate":          notification.DueDate,
+		"recurringPattern": notification.RecurringPattern,
+		"isSend":           notification.IsSend,
+		"createdAt":        notification.CreatedAt,
 	}
 
 	_, err := client.Doc(taskPath).Set(ctx, taskData)
