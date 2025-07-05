@@ -47,6 +47,7 @@ func StartServer() {
 
 	report.ReportController(router, DB, FB)
 
+	task.TaskController(router, DB, FB)
 	task.FinishTaskController(router, DB, FB)
 	task.CreateTaskController(router, DB, FB)
 	task.TodayTaskController(router, DB, FB)
