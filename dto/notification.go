@@ -5,3 +5,9 @@ type NotificationRequest struct {
 	DueDate          string `json:"due_date" binding:"required"`
 	RecurringPattern string `json:"recurring_pattern" binding:"required"`
 }
+
+type UpdateNotificationRequest struct {
+	DueDate          *string `json:"due_date"`
+	RecurringPattern *string `json:"recurring_pattern"`
+	IsSend           *bool   `json:"is_send"`
+}

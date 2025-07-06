@@ -8,6 +8,7 @@ import (
 	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,9 @@ func NotificationTaskController(router *gin.Engine, db *gorm.DB, firestoreClient
 	{
 		routes.POST("/add", func(c *gin.Context) {
 			CreateNotification(c, db, firestoreClient)
+		})
+		routes.PUT("/update/:taskid", func(c *gin.Context) {
+			UpdateNotificationDynamic(c, db, firestoreClient)
 		})
 	}
 }
@@ -221,4 +225,143 @@ func saveTaskToFirestore(ctx context.Context, client *firestore.Client, notifica
 
 	_, err := client.Doc(taskPath).Set(ctx, taskData)
 	return err
+}
+
+func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userId := c.MustGet("userId").(uint)
+	taskID := c.Param("taskid")
+
+	// Convert taskID to integer for validation
+	taskIDInt, err := strconv.Atoi(taskID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+
+	var req dto.UpdateNotificationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	// Validate user exists
+	var user model.User
+	if err := db.Where("user_id = ?", userId).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user"})
+		}
+		return
+	}
+
+	// Find the notification to update
+	var notification model.Notification
+	if err := db.Where("task_id = ?", taskIDInt).First(&notification).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Notification not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch notification"})
+		}
+		return
+	}
+
+	// Create update map for dynamic updates
+	updates := make(map[string]interface{})
+
+	// Parse and update due date if provided
+	if req.DueDate != nil {
+		parsedDate, err := time.Parse(time.RFC3339, *req.DueDate)
+		if err != nil {
+			// Try alternative format if RFC3339 fails
+			parsedDate, err = time.Parse("2006-01-02T15:04:05Z07:00", *req.DueDate)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid due date format. Use RFC3339 format"})
+				return
+			}
+		}
+		updates["due_date"] = parsedDate
+		notification.DueDate = parsedDate
+	}
+
+	// Update recurring pattern if provided
+	if req.RecurringPattern != nil {
+		updates["recurring_pattern"] = *req.RecurringPattern
+		notification.RecurringPattern = *req.RecurringPattern
+	}
+
+	// Update is_send if provided
+	if req.IsSend != nil {
+		updates["is_send"] = *req.IsSend
+		notification.IsSend = *req.IsSend
+	}
+
+	// If no updates provided, return error
+	if len(updates) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
+		return
+	}
+
+	// Update in database
+	if err := db.Model(&notification).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
+		return
+	}
+
+	// Update in Firebase with only the modified fields
+	if err := updateFirebaseNotification(firestoreClient, user, notification, updates); err != nil {
+		// Log the error but don't fail the request since DB update succeeded
+		fmt.Printf("Warning: Failed to update Firebase notification: %v\n", err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Notification updated successfully",
+		"notification": map[string]interface{}{
+			"notification_id":   notification.NotificationID,
+			"task_id":           notification.TaskID,
+			"due_date":          notification.DueDate,
+			"recurring_pattern": notification.RecurringPattern,
+			"is_send":           notification.IsSend,
+			"created_at":        notification.CreatedAt,
+		},
+	})
+}
+
+func updateFirebaseNotification(firestoreClient *firestore.Client, user model.User, notification model.Notification, updatedFields map[string]interface{}) error {
+	ctx := context.Background()
+
+	// Construct the Firebase path: /Notifications/{email}/Tasks/{notificationID}
+	docPath := fmt.Sprintf("Notifications/%s/Tasks/%d", user.Email, notification.NotificationID)
+
+	// Create Firebase document data only for updated fields
+	firebaseData := make(map[string]interface{})
+
+	// Map SQL field names to Firebase field names and add only updated fields
+	for sqlField, value := range updatedFields {
+		switch sqlField {
+		case "due_date":
+			firebaseData["dueDate"] = value
+		case "recurring_pattern":
+			firebaseData["recurringPattern"] = value
+		case "is_send":
+			firebaseData["isSend"] = value
+		}
+	}
+
+	// Always update the updatedAt timestamp when any field is updated
+	firebaseData["updatedAt"] = time.Now()
+
+	// Convert firebaseData map to []firestore.Update
+	var updates []firestore.Update
+	for k, v := range firebaseData {
+		updates = append(updates, firestore.Update{Path: k, Value: v})
+	}
+
+	// Update only the modified fields in Firebase
+	_, err := firestoreClient.Doc(docPath).Update(ctx, updates)
+	if err != nil {
+		return fmt.Errorf("failed to update Firebase document: %v", err)
+	}
+
+	return nil
 }
