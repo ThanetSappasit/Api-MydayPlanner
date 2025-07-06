@@ -4,6 +4,7 @@ import (
 	"log"
 	"mydayplanner/controller"
 	"mydayplanner/controller/admin"
+	"mydayplanner/controller/assigned"
 	"mydayplanner/controller/attachments"
 	"mydayplanner/controller/auth"
 	"mydayplanner/controller/board"
@@ -54,6 +55,8 @@ func StartServer() {
 	task.UpdateTaskController(router, DB, FB)
 	task.DeleteTaskController(router, DB, FB)
 
+	assigned.AssignedController(router, DB, FB)
+
 	notification.NotificationTaskController(router, DB, FB)
 
 	checklist.CreateChecklistController(router, DB, FB)
@@ -66,7 +69,6 @@ func StartServer() {
 	shareboard.ShareboardController(router, DB, FB)
 
 	controller.UserController(router, DB, FB)
-	controller.AssignedController(router, DB, FB)
 
 	router.Run()
 }

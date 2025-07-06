@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"mydayplanner/controller/assigned"
 	"mydayplanner/controller/user"
 	"mydayplanner/middleware"
 
@@ -36,10 +35,4 @@ func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 
 func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
 
-}
-
-func AssignedController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	router.POST("/assigned", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-		assigned.AssignedTask(c, db, firestoreClient)
-	})
 }
