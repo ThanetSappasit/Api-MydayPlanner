@@ -17,11 +17,14 @@ import (
 
 func AssignedController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
 	router.POST("/assigned", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
-		AssignedTask(c, db, firestoreClient)
+		AddAssignedTask(c, db, firestoreClient)
+	})
+	router.DELETE("/assigned/:assignid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+		DelAssignedTask(c, db, firestoreClient)
 	})
 }
 
-func AssignedTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+func AddAssignedTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	var assignedTask dto.AssignedTaskRequest
 	if err := c.ShouldBindJSON(&assignedTask); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request data"})
@@ -137,6 +140,78 @@ func createFirebaseAssignment(firestoreClient *firestore.Client, assignment mode
 	_, err := firestoreClient.Doc(docPath).Set(ctx, firebaseData)
 	if err != nil {
 		return fmt.Errorf("failed to create Firebase document: %v", err)
+	}
+
+	return nil
+}
+
+func DelAssignedTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	assignIDStr := c.Param("assignid")
+	assignID, err := strconv.Atoi(assignIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid assignment ID format"})
+		return
+	}
+
+	// Find the assignment in the database
+	var assignment model.Assigned
+	if err := db.Where("ass_id = ?", assignID).First(&assignment).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Assignment not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch assignment"})
+		}
+		return
+	}
+
+	// Begin transaction
+	tx := db.Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
+		return
+	}
+
+	// Delete from database
+	if err := tx.Where("ass_id = ?", assignID).Delete(&model.Assigned{}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete assignment"})
+		return
+	}
+
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
+		return
+	}
+
+	// Delete from Firebase
+	if err := deleteFirebaseAssignment(firestoreClient, assignID); err != nil {
+		// Log the error but don't fail the request since DB deletion succeeded
+		fmt.Printf("Warning: Failed to delete Firebase assignment: %v\n", err)
+	}
+
+	// Return success response
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Assignment deleted successfully",
+		"deleted_assignment": map[string]interface{}{
+			"ass_id":    assignment.AssID,
+			"task_id":   assignment.TaskID,
+			"user_id":   assignment.UserID,
+			"assign_at": assignment.AssignAt,
+		},
+	})
+}
+
+func deleteFirebaseAssignment(firestoreClient *firestore.Client, assignID int) error {
+	ctx := context.Background()
+
+	// Construct the Firebase path: /Assigned/{assignID}
+	docPath := fmt.Sprintf("Assigned/%d", assignID)
+
+	// Delete the document from Firebase
+	_, err := firestoreClient.Doc(docPath).Delete(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to delete Firebase document: %v", err)
 	}
 
 	return nil
