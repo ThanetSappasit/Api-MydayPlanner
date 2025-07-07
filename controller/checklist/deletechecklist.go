@@ -142,7 +142,7 @@ func DeleteChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 
 		for _, checklist := range existingChecklists {
 			docID := strconv.Itoa(int(checklist.ChecklistID))
-			_, err := firestoreClient.Collection("Checklist").Doc(docID).Delete(ctx)
+			_, err := firestoreClient.Collection("Tasks").Doc(taskIDStr).Collection("Checklist").Doc(docID).Delete(ctx)
 			if err != nil {
 				fmt.Printf("⚠️ Failed to delete checklist %s from Firestore: %v\n", docID, err)
 			}

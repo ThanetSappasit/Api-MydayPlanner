@@ -168,7 +168,7 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 }
 
 func saveTaskToFirestore(ctx context.Context, client *firestore.Client, checklist *model.Checklist, ChecklistID int) error {
-	taskPath := fmt.Sprintf("Checklist/%d", ChecklistID)
+	taskPath := fmt.Sprintf("Tasks/%d/Checklist/%d", checklist.TaskID, ChecklistID)
 
 	taskData := map[string]interface{}{
 		"checklist_id":   checklist.ChecklistID,

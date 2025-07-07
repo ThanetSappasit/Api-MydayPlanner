@@ -296,12 +296,15 @@ func (s *TaskService) saveTaskToFirestore(ctx context.Context, task *model.Tasks
 	taskPath := fmt.Sprintf("Boards/%d/Tasks/%d", boardID, task.TaskID)
 
 	taskData := map[string]interface{}{
-		"taskID":    task.TaskID,
-		"boardID":   boardID,
-		"taskName":  task.TaskName,
-		"status":    task.Status,
-		"createAt":  task.CreateAt,
-		"updatedAt": time.Now(),
+		"taskID":      task.TaskID,
+		"boardID":     boardID,
+		"taskName":    task.TaskName,
+		"description": task.Description,
+		"status":      task.Status,
+		"priority":    task.Priority,
+		"createBy":    task.CreateBy,
+		"createAt":    task.CreateAt,
+		"updatedAt":   time.Now(),
 	}
 
 	// Add optional fields safely

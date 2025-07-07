@@ -122,7 +122,7 @@ func createFirebaseAssignment(firestoreClient *firestore.Client, assignment mode
 	ctx := context.Background()
 
 	// Construct the Firebase path: /Assigned/{newAssignedID}
-	docPath := fmt.Sprintf("Assigned/%d", assignment.AssID)
+	docPath := fmt.Sprintf("Tasks/%d/Assigned/%d", task.TaskID, assignment.AssID)
 
 	// Create Firebase document data
 	firebaseData := map[string]interface{}{
@@ -185,7 +185,7 @@ func DelAssignedTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 	}
 
 	// Delete from Firebase
-	if err := deleteFirebaseAssignment(firestoreClient, assignID); err != nil {
+	if err := deleteFirebaseAssignment(firestoreClient, assignment); err != nil {
 		// Log the error but don't fail the request since DB deletion succeeded
 		fmt.Printf("Warning: Failed to delete Firebase assignment: %v\n", err)
 	}
@@ -202,11 +202,11 @@ func DelAssignedTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 	})
 }
 
-func deleteFirebaseAssignment(firestoreClient *firestore.Client, assignID int) error {
+func deleteFirebaseAssignment(firestoreClient *firestore.Client, assign model.Assigned) error {
 	ctx := context.Background()
 
 	// Construct the Firebase path: /Assigned/{assignID}
-	docPath := fmt.Sprintf("Assigned/%d", assignID)
+	docPath := fmt.Sprintf("Tasks/%d/Assigned/%d", assign.TaskID, assign.AssID)
 
 	// Delete the document from Firebase
 	_, err := firestoreClient.Doc(docPath).Delete(ctx)

@@ -133,7 +133,7 @@ func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		defer cancel()
 
 		docID := strconv.Itoa(int(attachment.AttachmentID))
-		_, err := firestoreClient.Collection("Attachments").Doc(docID).Set(ctx, map[string]interface{}{
+		_, err := firestoreClient.Collection("Tasks").Doc(taskIDStr).Collection("Attachments").Doc(docID).Set(ctx, map[string]interface{}{
 			"attachment_id": attachment.AttachmentID,
 			"tasks_id":      attachment.TasksID,
 			"file_name":     attachment.FileName,
@@ -280,7 +280,7 @@ func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		_, err := firestoreClient.Collection("Attachments").
+		_, err := firestoreClient.Collection("Tasks").Doc(taskIDStr).Collection("Attachments").
 			Doc(strconv.Itoa(attachmentIDInt)).
 			Delete(ctx)
 
