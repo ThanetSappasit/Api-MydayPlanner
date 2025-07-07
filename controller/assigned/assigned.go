@@ -122,7 +122,7 @@ func createFirebaseAssignment(firestoreClient *firestore.Client, assignment mode
 	ctx := context.Background()
 
 	// Construct the Firebase path: /Assigned/{newAssignedID}
-	docPath := fmt.Sprintf("Tasks/%d/Assigned/%d", task.TaskID, assignment.AssID)
+	docPath := fmt.Sprintf("BoardTasks/%d/Assigned/%d", task.TaskID, assignment.AssID)
 
 	// Create Firebase document data
 	firebaseData := map[string]interface{}{
@@ -206,7 +206,7 @@ func deleteFirebaseAssignment(firestoreClient *firestore.Client, assign model.As
 	ctx := context.Background()
 
 	// Construct the Firebase path: /Assigned/{assignID}
-	docPath := fmt.Sprintf("Tasks/%d/Assigned/%d", assign.TaskID, assign.AssID)
+	docPath := fmt.Sprintf("BoardTasks/%d/Assigned/%d", assign.TaskID, assign.AssID)
 
 	// Delete the document from Firebase
 	_, err := firestoreClient.Doc(docPath).Delete(ctx)

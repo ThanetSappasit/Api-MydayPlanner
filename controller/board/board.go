@@ -493,39 +493,74 @@ func NewBoardToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 }
 
 func Addboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-	userID := c.MustGet("userId").(uint)
-	boardID := c.Param("boardId")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	var user struct {
-		UserID int
-		Email  string
-	}
-	if err := db.Raw("SELECT user_id, email FROM user WHERE user_id = ?", userID).Scan(&user).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
+	// Extract userID safely
+	userIDVal, exists := c.Get("userId")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authorized"})
 		return
 	}
 
-	// Convert boardID from string to int
-	boardIDInt, err := strconv.Atoi(boardID)
+	userID, ok := userIDVal.(uint)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	boardIDStr := c.Param("boardId")
+	if boardIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Board ID is required"})
+		return
+	}
+
+	boardIDInt, err := strconv.Atoi(boardIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid board ID"})
 		return
 	}
 
-	// Create BoardUser record
+	// Query user information
+	var user struct {
+		UserID  int
+		Email   string
+		Name    string
+		Profile string
+	}
+	if err := db.Raw("SELECT user_id, email, name, profile FROM user WHERE user_id = ?", userID).Scan(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
+		return
+	}
+
+	// Create board-user relationship in DB
 	boardUser := model.BoardUser{
 		BoardID: boardIDInt,
 		UserID:  user.UserID,
 	}
 
-	// Insert into database
 	if err := db.Create(&boardUser).Error; err != nil {
-		// Check if it's a duplicate entry error
 		if strings.Contains(err.Error(), "Duplicate entry") || strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			c.JSON(http.StatusConflict, gin.H{"error": "User is already added to this board"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add user to board"})
+		return
+	}
+
+	// Add to Firestore
+	boardDocRef := firestoreClient.Collection("Boards").Doc(strconv.Itoa(boardIDInt)).Collection("BoardUsers").Doc(strconv.Itoa(boardUser.BoardUserID))
+
+	boardUserData := map[string]interface{}{
+		"BoardID": boardIDInt,
+		"UserID":  user.UserID,
+		"Name":    user.Name,
+		"Profile": user.Profile,
+		"AddedAt": time.Now(),
+	}
+
+	if _, err := boardDocRef.Set(ctx, boardUserData); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add user to board in Firestore: " + err.Error()})
 		return
 	}
 

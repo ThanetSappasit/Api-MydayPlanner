@@ -71,31 +71,31 @@ func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		if task.CreateBy != nil && uint(*task.CreateBy) == userID {
 			hasPermission = true
 			shouldSaveToFirestore = false // ไม่ต้องบันทึกลง Firestore เพราะไม่ใช่ board member
-		} else {
-			var boardUser model.BoardUser
-			if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userID).First(&boardUser).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					// ไม่ใช่ board member ตรวจว่าเป็น board owner หรือเปล่า
-					var board model.Board
-					if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userID).First(&board).Error; err != nil {
-						if errors.Is(err, gorm.ErrRecordNotFound) {
-							c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or owner"})
-						} else {
-							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
-						}
-						return
+		}
+	} else {
+		var boardUser model.BoardUser
+		if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userID).First(&boardUser).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// ไม่ใช่ board member ตรวจว่าเป็น board owner หรือเปล่า
+				var board model.Board
+				if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userID).First(&board).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or owner"})
+					} else {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
 					}
-					hasPermission = true
-					shouldSaveToFirestore = false
-				} else {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
 					return
 				}
-			} else {
-				// เป็นสมาชิกบอร์ด
 				hasPermission = true
-				shouldSaveToFirestore = true
+				shouldSaveToFirestore = false
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
+				return
 			}
+		} else {
+			// เป็นสมาชิกบอร์ด
+			hasPermission = true
+			shouldSaveToFirestore = true
 		}
 	}
 
@@ -133,7 +133,7 @@ func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		defer cancel()
 
 		docID := strconv.Itoa(int(attachment.AttachmentID))
-		_, err := firestoreClient.Collection("Tasks").Doc(taskIDStr).Collection("Attachments").Doc(docID).Set(ctx, map[string]interface{}{
+		_, err := firestoreClient.Collection("BoardTasks").Doc(taskIDStr).Collection("Attachments").Doc(docID).Set(ctx, map[string]interface{}{
 			"attachment_id": attachment.AttachmentID,
 			"tasks_id":      attachment.TasksID,
 			"file_name":     attachment.FileName,
@@ -226,30 +226,31 @@ func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		if task.CreateBy != nil && uint(*task.CreateBy) == userID {
 			hasPermission = true
 			shouldDeleteFromFirestore = false // ไม่ต้องบันทึกลง Firestore เพราะไม่ใช่ board member
-		} else {
-			var boardUser model.BoardUser
-			if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userID).First(&boardUser).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					// ไม่ใช่ board member → ตรวจว่าเป็นเจ้าของ board หรือไม่
-					var board model.Board
-					if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userID).First(&board).Error; err != nil {
-						if errors.Is(err, gorm.ErrRecordNotFound) {
-							c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or board owner"})
-						} else {
-							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
-						}
-						return
+		}
+
+	} else {
+		var boardUser model.BoardUser
+		if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userID).First(&boardUser).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// ไม่ใช่ board member → ตรวจว่าเป็นเจ้าของ board หรือไม่
+				var board model.Board
+				if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userID).First(&board).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or board owner"})
+					} else {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
 					}
-					hasPermission = true
-					shouldDeleteFromFirestore = false
-				} else {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
 					return
 				}
-			} else {
 				hasPermission = true
-				shouldDeleteFromFirestore = true
+				shouldDeleteFromFirestore = false
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
+				return
 			}
+		} else {
+			hasPermission = true
+			shouldDeleteFromFirestore = true
 		}
 	}
 
@@ -280,7 +281,7 @@ func DeleteAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		_, err := firestoreClient.Collection("Tasks").Doc(taskIDStr).Collection("Attachments").
+		_, err := firestoreClient.Collection("BoardTasks").Doc(taskIDStr).Collection("Attachments").
 			Doc(strconv.Itoa(attachmentIDInt)).
 			Delete(ctx)
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -37,11 +38,12 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 
 	// 1. ลดการ query ข้อมูล user โดยเลือกเฉพาะข้อมูลที่จำเป็น
 	var user struct {
-		UserID int
-		Name   string
-		Email  string
+		UserID  int
+		Name    string
+		Email   string
+		Profile string
 	}
-	if err := db.Table("user").Select("user_id, name, email").Where("user_id = ?", userId).First(&user).Error; err != nil {
+	if err := db.Table("user").Select("user_id, name, email, profile").Where("user_id = ?", userId).First(&user).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
@@ -54,12 +56,7 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	}
 
 	// แปลงค่า is_group เป็นชื่อ collection
-	groupType := "Private"
-	isGroupBoard := false
-	if board.Is_group == "1" {
-		groupType = "Group"
-		isGroupBoard = true
-	}
+	isGroupBoard := board.Is_group == "1"
 
 	// 2. สร้าง board ใน PostgreSQL ก่อน
 	tx := db.Begin()
@@ -80,8 +77,10 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	}
 
 	var deepLink string
+	var boardUser model.BoardUser
 	if isGroupBoard {
-		boardUser := model.BoardUser{
+		// สร้าง BoardUser
+		boardUser = model.BoardUser{
 			BoardID: newBoard.BoardID,
 			UserID:  user.UserID,
 			AddedAt: time.Now(),
@@ -93,20 +92,14 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 			return
 		}
 
-		// สร้างเวลาหมดอายุ (เช่น 7 วันจากตอนนี้)
+		// สร้าง share token
 		expireAt := time.Now().Add(7 * 24 * time.Hour)
-
-		// สร้าง URL parameters
 		params := url.Values{}
 		params.Add("boardId", strconv.Itoa(newBoard.BoardID))
 		params.Add("expire", strconv.FormatInt(expireAt.Unix(), 10))
 
-		paramsString := params.Encode()
+		encodedParams := base64.URLEncoding.EncodeToString([]byte(params.Encode()))
 
-		// Method 1: ใช้ base64 encoding
-		encodedParams := base64.URLEncoding.EncodeToString([]byte(paramsString))
-
-		// บันทึก share token ลง database
 		shareToken := model.BoardToken{
 			BoardID:   newBoard.BoardID,
 			Token:     encodedParams,
@@ -142,36 +135,71 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 
 	// 3. บันทึกข้อมูลลง Firestore เฉพาะเมื่อเป็น Group Board เท่านั้น
 	if isGroupBoard {
-		// ส่งข้อมูลไป Firebase ผ่าน goroutine
-		errChan := make(chan error, 1)
+		// ใช้ WaitGroup เพื่อรอ goroutines ทั้งหมด
+		var wg sync.WaitGroup
+		var firestoreErr error
+		var mu sync.Mutex
 
+		wg.Add(2)
+
+		// บันทึก Board ลง Firestore
 		go func() {
+			defer wg.Done()
 			defer func() {
 				if r := recover(); r != nil {
-					if err, ok := r.(error); ok {
-						errChan <- err
-					} else {
-						errChan <- fmt.Errorf("panic in Firebase operation: %v", r)
-					}
+					mu.Lock()
+					firestoreErr = fmt.Errorf("panic in Firebase board operation: %v", r)
+					mu.Unlock()
 				}
 			}()
 
 			boardDataFirebase := gin.H{
-				"BoardID":   newBoard.BoardID,
-				"BoardName": newBoard.BoardName,
-				"CreatedBy": newBoard.CreatedBy,
-				"CreatedAt": newBoard.CreatedAt,
-				"Type":      groupType,
-				"Members":   []int{user.UserID}, // เพิ่ม members array
+				"BoardID":        newBoard.BoardID,
+				"BoardName":      newBoard.BoardName,
+				"CreatedBy":      newBoard.CreatedBy,
+				"CreatedAt":      newBoard.CreatedAt,
+				"Type":           "Group",
+				"ShareToken":     deepLink,
+				"ShareExpiresAt": time.Now().Add(7 * 24 * time.Hour),
 			}
 
 			boardDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(newBoard.BoardID))
-			_, err := boardDoc.Set(ctx, boardDataFirebase)
-			errChan <- err
+			if _, err := boardDoc.Set(ctx, boardDataFirebase); err != nil {
+				mu.Lock()
+				firestoreErr = fmt.Errorf("failed to create board in Firestore: %w", err)
+				mu.Unlock()
+			}
 		}()
 
-		// รอผลลัพธ์จาก Firebase
-		firestoreErr := <-errChan
+		// บันทึก BoardUser ลง Firestore
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					firestoreErr = fmt.Errorf("panic in Firebase user operation: %v", r)
+					mu.Unlock()
+				}
+			}()
+
+			boardUserData := gin.H{
+				"BoardID": newBoard.BoardID,
+				"UserID":  user.UserID,
+				"Name":    user.Name,
+				"Profile": user.Profile,
+				"AddedAt": time.Now(),
+			}
+
+			userDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(newBoard.BoardID)).Collection("BoardUsers").Doc(strconv.Itoa(boardUser.BoardUserID))
+			if _, err := userDoc.Set(ctx, boardUserData); err != nil {
+				mu.Lock()
+				firestoreErr = fmt.Errorf("failed to create board user in Firestore: %w", err)
+				mu.Unlock()
+			}
+		}()
+
+		// รอให้ goroutines ทั้งหมดเสร็จสิ้น
+		wg.Wait()
 
 		// ตรวจสอบ error จาก Firestore
 		if firestoreErr != nil {

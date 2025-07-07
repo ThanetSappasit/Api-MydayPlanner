@@ -85,7 +85,7 @@ func CompleteChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.C
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		_, err := firestoreClient.Collection("Checklist").
+		_, err := firestoreClient.Collection("BoardTasks").Doc(strconv.Itoa(task.TaskID)).Collection("Checklist").
 			Doc(strconv.Itoa(checklistID)).
 			Update(ctx, []firestore.Update{
 				{Path: "status", Value: newStatus},
