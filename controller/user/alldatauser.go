@@ -276,7 +276,6 @@ func extractBoardIDs(boardData, boardGroupData []map[string]interface{}) []uint 
 }
 
 // Updated function to include user tasks and handle null board_id
-// Updated function to include user tasks and handle null board_id
 func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint, userId uint) ([]map[string]interface{}, error) {
 	// Fetch tasks from boards + tasks with null board_id created by user
 	var tasksData []struct {
@@ -299,8 +298,8 @@ func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint, userId uint) ([]ma
 	var args []interface{}
 
 	if len(allBoardIDs) > 0 {
-		query += `(board_id IN (?) OR (board_id IS NULL AND create_by = ?))`
-		args = append(args, allBoardIDs, userId)
+		query += `(board_id IN (?) OR (board_id IS NULL ))`
+		args = append(args, allBoardIDs)
 	} else {
 		query += `(board_id IS NULL AND create_by = ?)`
 		args = append(args, userId)
