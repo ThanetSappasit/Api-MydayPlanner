@@ -120,8 +120,9 @@ func (s *TaskService) CreateTodayTaskHandler(c *gin.Context) {
 	}
 
 	// Handle Firestore operations (non-blocking)
+	// For today tasks, shouldSaveToFirestore is false (board-related)
 	if notification != nil {
-		go s.saveNotificationToFirestore(notification, user.Email)
+		go s.saveNotificationToFirestore(notification, user.Email, false)
 	}
 
 	// Prepare response
@@ -272,12 +273,12 @@ func (s *TaskService) createNotificationInTx(tx *gorm.DB, taskID uint, reminder 
 }
 
 // ตรวจสอบและบันทึกการดำเนินการ Firestore
-func (s *TaskService) handleFirestoreOperations(task *model.Tasks, notification *model.Notification, userEmail string, shouldSaveTask bool) {
+func (s *TaskService) handleFirestoreOperations(task *model.Tasks, notification *model.Notification, userEmail string, shouldSaveToFirestore bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	// Save task to Firestore if needed
-	if shouldSaveTask && task.BoardID != nil {
+	if shouldSaveToFirestore && task.BoardID != nil {
 		if err := s.saveTaskToFirestore(ctx, task, int(*task.BoardID)); err != nil {
 			log.Printf("Warning: Failed to save task to Firestore: %v", err)
 		}
@@ -285,7 +286,7 @@ func (s *TaskService) handleFirestoreOperations(task *model.Tasks, notification 
 
 	// Save notification to Firestore if exists
 	if notification != nil {
-		if err := s.saveNotificationToFirestore(notification, userEmail); err != nil {
+		if err := s.saveNotificationToFirestore(notification, userEmail, shouldSaveToFirestore); err != nil {
 			log.Printf("Warning: Failed to save notification to Firestore: %v", err)
 		}
 	}
@@ -323,11 +324,20 @@ func (s *TaskService) saveTaskToFirestore(ctx context.Context, task *model.Tasks
 }
 
 // บันทึกการแจ้งเตือนใน Firestore
-func (s *TaskService) saveNotificationToFirestore(notification *model.Notification, email string) error {
+func (s *TaskService) saveNotificationToFirestore(notification *model.Notification, email string, shouldSaveToFirestore bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	notificationPath := fmt.Sprintf("Notifications/%s/Tasks/%d", email, notification.NotificationID)
+	var notificationPath string
+
+	// แยก path ตาม shouldSaveToFirestore
+	if shouldSaveToFirestore {
+		// สำหรับ board tasks ที่ user เป็น board member
+		notificationPath = fmt.Sprintf("BoardTasks/%d/Notifications/%d", notification.TaskID, notification.NotificationID)
+	} else {
+		// สำหรับ today tasks หรือ board tasks ที่ user เป็น board owner
+		notificationPath = fmt.Sprintf("Notifications/%s/Tasks/%d", email, notification.NotificationID)
+	}
 
 	notificationData := map[string]interface{}{
 		"notificationID": notification.NotificationID,
