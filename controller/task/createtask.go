@@ -295,6 +295,14 @@ func (s *TaskService) handleFirestoreOperations(task *model.Tasks, notification 
 // บันทึกงานใน Firestore
 func (s *TaskService) saveTaskToFirestore(ctx context.Context, task *model.Tasks, boardID int) error {
 	taskPath := fmt.Sprintf("Boards/%d/Tasks/%d", boardID, task.TaskID)
+	boardPath := fmt.Sprintf("BoardTasks/%d", task.TaskID)
+
+	boardData := map[string]interface{}{
+		"createAt": task.CreateAt,
+	}
+	if _, err := s.firestoreClient.Doc(boardPath).Set(ctx, boardData, firestore.MergeAll); err != nil {
+		return err
+	}
 
 	taskData := map[string]interface{}{
 		"taskID":      task.TaskID,
