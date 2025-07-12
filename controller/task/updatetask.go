@@ -111,7 +111,7 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 	// ตรวจสอบและเพิ่มฟิลด์ที่จะอัปเดท
 	if strings.TrimSpace(taskreq.TaskName) != "" {
 		taskName := strings.TrimSpace(taskreq.TaskName)
-		if len(taskName) > 255 { // เพิ่ม validation
+		if len(taskName) > 255 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Task name is too long (max 255 characters)"})
 			return
 		}
@@ -120,7 +120,7 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 
 	if strings.TrimSpace(taskreq.Description) != "" {
 		description := strings.TrimSpace(taskreq.Description)
-		if len(description) > 2000 { // เพิ่ม validation
+		if len(description) > 2000 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Description is too long (max 2000 characters)"})
 			return
 		}
@@ -156,13 +156,12 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		// เตรียมข้อมูลสำหรับ Firestore
 		firestoreUpdates := []firestore.Update{}
 		for key, value := range updates {
-			// ไม่ส่ง updated_at ไป Firestore เพราะ Firestore มี timestamp เป็นของตัวเอง
-			if key != "updated_at" {
-				firestoreUpdates = append(firestoreUpdates, firestore.Update{
-					Path:  key,
-					Value: value,
-				})
-			}
+			// แปลงชื่อฟิลด์สำหรับ Firestore
+			firestoreFieldName := convertToFirestoreFieldName(key)
+			firestoreUpdates = append(firestoreUpdates, firestore.Update{
+				Path:  firestoreFieldName,
+				Value: value,
+			})
 		}
 
 		if len(firestoreUpdates) > 0 {
@@ -214,13 +213,11 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 				// สร้าง updates สำหรับ rollback
 				rollbackUpdates := []firestore.Update{}
 				for key := range updates {
-					if key != "updated_at" {
-						if originalValue, exists := firestoreOriginalData[key]; exists {
-							rollbackUpdates = append(rollbackUpdates, firestore.Update{
-								Path:  key,
-								Value: originalValue,
-							})
-						}
+					if originalValue, exists := firestoreOriginalData[key]; exists {
+						rollbackUpdates = append(rollbackUpdates, firestore.Update{
+							Path:  key,
+							Value: originalValue,
+						})
 					}
 				}
 
@@ -275,10 +272,20 @@ func getUpdatedFieldNames(updates map[string]interface{}) []string {
 			fields = append(fields, "description")
 		case "priority":
 			fields = append(fields, "priority")
-		case "updated_at":
-			// ไม่ต้องแสดง updated_at
-			continue
 		}
 	}
 	return fields
+}
+
+func convertToFirestoreFieldName(dbFieldName string) string {
+	switch dbFieldName {
+	case "task_name":
+		return "taskName"
+	case "description":
+		return "description"
+	case "priority":
+		return "priority"
+	default:
+		return dbFieldName
+	}
 }
