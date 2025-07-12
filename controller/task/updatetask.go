@@ -270,11 +270,11 @@ func getUpdatedFieldNames(updates map[string]interface{}) []string {
 	for key := range updates {
 		switch key {
 		case "task_name":
-			fields = append(fields, "Task Name")
+			fields = append(fields, "taskName")
 		case "description":
-			fields = append(fields, "Description")
+			fields = append(fields, "description")
 		case "priority":
-			fields = append(fields, "Priority")
+			fields = append(fields, "priority")
 		case "updated_at":
 			// ไม่ต้องแสดง updated_at
 			continue
