@@ -187,6 +187,7 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 				"UserID":  user.UserID,
 				"Name":    user.Name,
 				"Profile": user.Profile,
+				"Email":   user.Email,
 				"AddedAt": time.Now(),
 			}
 
