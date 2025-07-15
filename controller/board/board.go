@@ -480,6 +480,16 @@ func NewBoardToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	data := map[string]interface{}{
+		"ShareToken":     encodedParams,
+		"ShareExpiresAt": expireAt,
+	}
+	if err := saveTaskToFirestore(ctx, firestoreClient, boardIDInt, data); err != nil {
+		fmt.Printf("Warning: Failed to save token to Firestore: %v\n", err)
+	}
+
 	// ส่งข้อมูล token กลับไป
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Board token updated successfully",
@@ -490,6 +500,22 @@ func NewBoardToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 			"is_expired": true,
 		},
 	})
+}
+
+func saveTaskToFirestore(ctx context.Context, client *firestore.Client, boardID int, data map[string]interface{}) error {
+	boardPath := fmt.Sprintf("Boards/%d", boardID)
+
+	// แปลง map[string]interface{} เป็น []firestore.Update
+	var updates []firestore.Update
+	for k, v := range data {
+		updates = append(updates, firestore.Update{
+			Path:  k,
+			Value: v,
+		})
+	}
+
+	_, err := client.Doc(boardPath).Update(ctx, updates)
+	return err
 }
 
 func Addboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
