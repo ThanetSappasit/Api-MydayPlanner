@@ -274,15 +274,15 @@ func (s *TaskService) createNotificationInTx(tx *gorm.DB, taskID uint, reminder 
 
 // ตรวจสอบและบันทึกการดำเนินการ Firestore
 func (s *TaskService) handleFirestoreOperations(task *model.Tasks, notification *model.Notification, userEmail string, shouldSaveToFirestore bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// defer cancel()
 
-	// Save task to Firestore if needed
-	if shouldSaveToFirestore && task.BoardID != nil {
-		if err := s.saveTaskToFirestore(ctx, task, int(*task.BoardID)); err != nil {
-			log.Printf("Warning: Failed to save task to Firestore: %v", err)
-		}
-	}
+	// // Save task to Firestore if needed
+	// if shouldSaveToFirestore && task.BoardID != nil {
+	// 	if err := s.saveTaskToFirestore(ctx, task, int(*task.BoardID)); err != nil {
+	// 		log.Printf("Warning: Failed to save task to Firestore: %v", err)
+	// 	}
+	// }
 
 	// Save notification to Firestore if exists
 	if notification != nil {
