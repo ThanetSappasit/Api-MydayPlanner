@@ -16,8 +16,6 @@ import (
 
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"gorm.io/gorm"
 )
 
@@ -53,110 +51,141 @@ type BoardInvite struct {
 
 func AdjustBoards(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userID := c.MustGet("userId").(uint)
+
 	var adjustData dto.AdjustBoardRequest
 	if err := c.ShouldBindJSON(&adjustData); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 		return
 	}
 
-	// Validate input
-	if adjustData.BoardID == "" || adjustData.BoardName == "" {
+	// ตรวจสอบค่า input
+	if strings.TrimSpace(adjustData.BoardID) == "" || strings.TrimSpace(adjustData.BoardName) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "BoardID and BoardName are required"})
 		return
 	}
-
-	var user struct {
-		UserID int
-		Email  string
-	}
-	if err := db.Raw("SELECT user_id, email FROM user WHERE user_id = ?", userID).Scan(&user).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
+	boardName := strings.TrimSpace(adjustData.BoardName)
+	if len(boardName) > 255 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Board name is too long (max 255 characters)"})
 		return
 	}
 
-	ctx := c.Request.Context()
+	// ตรวจสอบสิทธิ์ของผู้ใช้
+	var board struct {
+		BoardID  string
+		CreateBy int
+	}
+	if err := db.Table("board").
+		Select("board_id, create_by").
+		Where("board_id = ?", adjustData.BoardID).
+		First(&board).Error; err != nil {
 
-	// สร้าง reference ไปยัง board document
-	boardDocRef := firestoreClient.Collection("Boards").Doc(adjustData.BoardID)
-
-	// ตรวจสอบว่า board มีอยู่จริงหรือไม่
-	boardDoc, err := boardDocRef.Get(ctx)
-	if err != nil {
-		if status.Code(err) == codes.NotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Board not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get board data"})
+		}
+		return
+	}
+
+	// ตรวจสอบว่าผู้ใช้เป็นเจ้าของหรือสมาชิกบอร์ดหรือไม่
+	var canUpdate = false
+	var shouldUpdateFirestore = false
+
+	if board.CreateBy == int(userID) {
+		canUpdate = true
+		shouldUpdateFirestore = false
+	} else {
+		var boardUser model.BoardUser
+		if err := db.Where("board_id = ? AND user_id = ?", adjustData.BoardID, userID).First(&boardUser).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not the board owner or member"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board membership"})
+			}
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get board data"})
+		canUpdate = true
+		shouldUpdateFirestore = true
+	}
+
+	if !canUpdate {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
 		return
 	}
 
-	// ตรวจสอบว่า board เป็นของ user นี้หรือไม่ (optional: ตรวจสอบ CreatedBy field)
-	boardData := boardDoc.Data()
-	if createdBy, ok := boardData["CreatedBy"]; ok {
-		if createdByInt, ok := createdBy.(int64); ok && int(createdByInt) != user.UserID {
-			c.JSON(http.StatusForbidden, gin.H{"error": "You don't have permission to modify this board"})
+	// Firestore Rollback Variables
+	var firestoreDocRef *firestore.DocumentRef
+	var firestoreOriginalData map[string]interface{}
+	var firestoreUpdated = false
+
+	// อัพเดต Firestore ก่อน (ถ้าเป็นสมาชิก)
+	if shouldUpdateFirestore {
+		ctx := c.Request.Context()
+		firestoreDocRef = firestoreClient.Collection("Boards").Doc(adjustData.BoardID)
+
+		// ดึงข้อมูลเดิมมา backup
+		docSnap, err := firestoreDocRef.Get(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get Firestore board data"})
 			return
 		}
-	}
-
-	// เริ่ม transaction เพื่ออัปเดตทั้ง Firebase และ SQL
-	tx := db.Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
+		if docSnap.Exists() {
+			firestoreOriginalData = docSnap.Data()
 		}
-	}()
 
-	// อัปเดตใน SQL Database
-	result := tx.Exec("UPDATE board SET board_name = ? WHERE board_id = ?",
-		adjustData.BoardName, adjustData.BoardID)
-
-	if result.Error != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to update board in database: %v", result.Error),
+		// อัปเดต Firestore
+		_, err = firestoreDocRef.Update(ctx, []firestore.Update{
+			{Path: "BoardName", Value: boardName},
 		})
-		return
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update board in Firestore"})
+			return
+		}
+		firestoreUpdated = true
 	}
 
-	// ตรวจสอบว่ามีการอัปเดตจริงหรือไม่
-	if result.RowsAffected == 0 {
-		tx.Rollback()
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": "Board not found or you don't have permission to modify this board",
-		})
-		return
-	}
-
-	// อัปเดตใน Firebase
-	_, err = boardDocRef.Update(ctx, []firestore.Update{
-		{
-			Path:  "BoardName",
-			Value: adjustData.BoardName,
-		},
+	// อัพเดต SQL ภายใต้ Transaction
+	err := db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Exec("UPDATE board SET board_name = ? WHERE board_id = ?", boardName, adjustData.BoardID)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
 	})
 
+	// Rollback Firestore ถ้า SQL fail
 	if err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to update board in Firebase: %v", err),
-		})
+		if firestoreUpdated && firestoreDocRef != nil {
+			ctx := c.Request.Context()
+			if firestoreOriginalData != nil {
+				if originalBoardName, exists := firestoreOriginalData["BoardName"]; exists {
+					_, rollbackErr := firestoreDocRef.Update(ctx, []firestore.Update{
+						{Path: "BoardName", Value: originalBoardName},
+					})
+					if rollbackErr != nil {
+						fmt.Printf("CRITICAL: Firestore rollback failed for board %s: %v\n", adjustData.BoardID, rollbackErr)
+					}
+				}
+			}
+		}
+
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Board not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update board"})
+		}
 		return
 	}
 
-	// Commit transaction
-	if err := tx.Commit().Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("Failed to commit transaction: %v", err),
-		})
-		return
-	}
-
-	// ส่ง response กลับ
+	// Success
 	c.JSON(http.StatusOK, gin.H{
-		"message":    "Board updated successfully",
-		"board_id":   adjustData.BoardID,
-		"board_name": adjustData.BoardName,
+		"message":          "Board updated successfully",
+		"board_id":         adjustData.BoardID,
+		"board_name":       boardName,
+		"firestoreUpdated": firestoreUpdated,
 	})
 }
 
