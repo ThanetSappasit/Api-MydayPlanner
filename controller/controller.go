@@ -21,7 +21,7 @@ func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 		routes.GET("/alluser", func(c *gin.Context) {
 			user.GetAllUser(c, db, firestoreClient)
 		})
-		routes.GET("/search", func(c *gin.Context) {
+		routes.POST("/search", func(c *gin.Context) {
 			user.SearchUser(c, db)
 		})
 		routes.PUT("/profile", func(c *gin.Context) {
