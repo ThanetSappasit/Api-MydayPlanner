@@ -331,3 +331,52 @@ func RemovePassword(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 		"message": message,
 	})
 }
+
+func SearchUser(c *gin.Context, db *gorm.DB) {
+	var emailReq dto.EmailText
+	if err := c.ShouldBindJSON(&emailReq); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+		return
+	}
+
+	// ใช้ %string% สำหรับค้นหาคล้ายกัน
+	searchTerm := "%" + emailReq.Email + "%"
+
+	var users []model.User
+	if err := db.Where("email LIKE ?", searchTerm).Find(&users).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	if len(users) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"message": "No matching users found"})
+		return
+	}
+
+	// map ข้อมูลแต่ละ user -> response (ไม่รวม password)
+	var userResponses []interface{}
+	for _, user := range users {
+		userResp := struct {
+			UserID    int    `json:"user_id"`
+			Name      string `json:"name"`
+			Email     string `json:"email"`
+			Profile   string `json:"profile"`
+			Role      string `json:"role"`
+			IsVerify  string `json:"is_verify"`
+			IsActive  string `json:"is_active"`
+			CreatedAt string `json:"created_at"`
+		}{
+			UserID:    user.UserID,
+			Name:      user.Name,
+			Email:     user.Email,
+			Profile:   user.Profile,
+			Role:      user.Role,
+			IsVerify:  user.IsVerify,
+			IsActive:  user.IsActive,
+			CreatedAt: user.CreatedAt.Format(time.RFC3339),
+		}
+		userResponses = append(userResponses, userResp)
+	}
+
+	c.JSON(http.StatusOK, userResponses)
+}

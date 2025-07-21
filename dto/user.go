@@ -13,3 +13,7 @@ type PasswordRequest struct {
 	OldPassword string `json:"oldpassword" binding:"required"`
 	NewPassword string `json:"newpassword" binding:"required"`
 }
+
+type EmailText struct {
+	Email string
+}
