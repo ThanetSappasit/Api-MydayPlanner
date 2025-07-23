@@ -339,11 +339,10 @@ func SearchUser(c *gin.Context, db *gorm.DB) {
 		return
 	}
 
-	// ใช้ %string% สำหรับค้นหาคล้ายกัน
-	searchTerm := "%" + emailReq.Email + "%"
+	searchPattern := "%" + emailReq.Email + "%"
 
 	var users []model.User
-	if err := db.Where("email LIKE ?", searchTerm).Find(&users).Error; err != nil {
+	if err := db.Where("email LIKE ? AND is_verify != ? AND is_active = ?", searchPattern, "0", "1").Find(&users).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return
 	}
