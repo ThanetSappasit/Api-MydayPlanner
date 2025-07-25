@@ -157,13 +157,32 @@ func deleteBoardWithPermissionCheck(db *gorm.DB, firestoreClient *firestore.Clie
 		NotificationID int
 		TaskID         int
 	}
+
 	if len(taskIDs) > 0 {
-		if err := db.Raw(`
-			SELECT notification_id, task_id
-			FROM notifications
-			WHERE task_id IN ?
-		`, taskIDs).Scan(&notifications).Error; err != nil {
-			return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to get notifications: %v", err)}
+		// ตรวจสอบว่าตาราง notifications มีอยู่หรือไม่
+		var tableExists bool
+		err := db.Raw("SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'notifications'").Scan(&tableExists).Error
+
+		if err != nil {
+			return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to check notifications table existence: %v", err)}
+		}
+
+		// ถ้าตารางมีอยู่ ให้ดึงข้อมูล notifications
+		if tableExists {
+			if err := db.Raw(`
+				SELECT notification_id, task_id
+				FROM notifications
+				WHERE task_id IN ?
+			`, taskIDs).Scan(&notifications).Error; err != nil {
+				return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to get notifications: %v", err)}
+			}
+		} else {
+			// ถ้าตารางไม่มี ให้ log warning และใช้ slice ว่าง
+			log.Printf("Warning: notifications table does not exist, skipping notification deletion for board %d", boardID)
+			notifications = []struct {
+				NotificationID int
+				TaskID         int
+			}{}
 		}
 	}
 
