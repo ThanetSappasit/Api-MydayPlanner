@@ -37,6 +37,9 @@ func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore
 		routes.PUT("/newtoken/:boardId", func(c *gin.Context) {
 			NewBoardToken(c, db, firestoreClient)
 		})
+		routes.DELETE("/boarduser", func(c *gin.Context) {
+			DeleteUserOnboard(c, db, firestoreClient)
+		})
 	}
 }
 
@@ -624,4 +627,38 @@ func Addboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		"board_user_id": boardUser.BoardUserID,
 		"board_id":      boardUser.BoardID,
 	})
+}
+
+func DeleteUserOnboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	var req dto.BoarduserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+		return
+	}
+
+	// ค้นหา BoardUser จาก SQL
+	var boardUser model.BoardUser
+	if err := db.Where("board_id = ? AND user_id = ?", req.BoardID, req.UserID).First(&boardUser).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "BoardUser not found"})
+		return
+	}
+
+	// ลบจาก SQL
+	if err := db.Delete(&boardUser).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete from SQL"})
+		return
+	}
+
+	// ลบจาก Firestore
+	docPath := fmt.Sprintf("Boards/%s/BoardUsers/%d", req.BoardID, boardUser.BoardUserID)
+	_, err := firestoreClient.Doc(docPath).Delete(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":         "Deleted from SQL, but failed to delete from Firestore",
+			"firestorePath": docPath,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "BoardUser deleted successfully"})
 }

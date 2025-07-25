@@ -28,3 +28,8 @@ type AcceptBoardRequest struct {
 	InviteID string `json:"inviteid" validate:"required"`
 	Accept   bool   `json:"accept" validate:"required"`
 }
+
+type BoarduserRequest struct {
+	BoardID string `json:"board_id" validate:"required"`
+	UserID  string `json:"user_id" validate:"required"`
+}
