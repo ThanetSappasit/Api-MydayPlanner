@@ -8,6 +8,7 @@ type NotificationRequest struct {
 
 type UpdateNotificationRequest struct {
 	DueDate          *string `json:"due_date"`
+	BeforeDueDate    *string `json:"before_due_date"`
 	RecurringPattern *string `json:"recurring_pattern"`
 	IsSend           *bool   `json:"is_send"`
 }

@@ -144,6 +144,19 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		notification.DueDate = parsedDate
 	}
 
+	if req.BeforeDueDate != nil {
+		parsedBeforeDate, err := time.Parse(time.RFC3339, *req.BeforeDueDate)
+		if err != nil {
+			parsedBeforeDate, err = time.Parse("2006-01-02T15:04:05Z07:00", *req.BeforeDueDate)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid before due date format. Use RFC3339 format"})
+				return
+			}
+		}
+		updates["beforedue_date"] = parsedBeforeDate
+		notification.BeforeDueDate = &parsedBeforeDate
+	}
+
 	// Update recurring pattern if provided
 	if req.RecurringPattern != nil {
 		updates["recurring_pattern"] = *req.RecurringPattern
@@ -213,6 +226,8 @@ func updateFirebaseNotification(firestoreClient *firestore.Client, user model.Us
 		switch sqlField {
 		case "due_date":
 			firebaseData["dueDate"] = value
+		case "beforedue_date":
+			firebaseData["beforeDueDate"] = value
 		case "recurring_pattern":
 			firebaseData["recurringPattern"] = value
 		case "is_send":
