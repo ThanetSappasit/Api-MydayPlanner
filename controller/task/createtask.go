@@ -240,9 +240,19 @@ func (s *TaskService) createNotificationInTx(tx *gorm.DB, taskID uint, reminder 
 		return nil, fmt.Errorf("invalid DueDate format: %w", err)
 	}
 
+	var parsedBeforeDueDate *time.Time
+	if reminder.BeforeDueDate != nil && *reminder.BeforeDueDate != "" {
+		beforeDue, err := parseDateTime(*reminder.BeforeDueDate)
+		if err != nil {
+			return nil, fmt.Errorf("invalid BeforeDueDate format: %w", err)
+		}
+		parsedBeforeDueDate = &beforeDue
+	}
+
 	notification := &model.Notification{
 		TaskID:           int(taskID),
 		DueDate:          parsedDueDate,
+		BeforeDueDate:    parsedBeforeDueDate,
 		RecurringPattern: reminder.RecurringPattern,
 		IsSend: func() string {
 			if parsedDueDate.Before(time.Now()) {
