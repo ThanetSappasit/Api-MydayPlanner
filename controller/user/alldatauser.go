@@ -433,12 +433,27 @@ func buildAttachmentsMap(attachments []model.Attachment) []map[string]interface{
 func buildNotificationsMap(notifications []model.Notification) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(notifications))
 	for _, notification := range notifications {
+		// Handle null BeforeDueDate - convert to "none"
+		var beforeDueDate interface{}
+		if notification.BeforeDueDate == nil {
+			beforeDueDate = "none"
+		} else {
+			beforeDueDate = *notification.BeforeDueDate
+		}
+
+		// Keep IsSend as string but handle empty values
+		isSend := notification.IsSend
+		if isSend == "" {
+			isSend = "0" // default value
+		}
+
 		result = append(result, map[string]interface{}{
 			"NotificationID":   notification.NotificationID,
 			"TaskID":           notification.TaskID,
 			"DueDate":          notification.DueDate,
+			"BeforeDueDate":    beforeDueDate,
 			"RecurringPattern": notification.RecurringPattern,
-			"IsSend":           notification.IsSend,
+			"IsSend":           isSend, // ยังคงเป็น string
 			"CreatedAt":        notification.CreatedAt,
 		})
 	}
@@ -513,8 +528,8 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 	go func() {
 		defer wg.Done()
 		var notificationsData []model.Notification
-		if err := db.Raw(`SELECT notification_id, task_id, due_date, recurring_pattern, is_send, created_at 
-			FROM notification WHERE task_id IN (?)`, taskIDs).Scan(&notificationsData).Error; err != nil {
+		if err := db.Raw(`SELECT notification_id, task_id, due_date, beforedue_date, recurring_pattern, is_send, created_at 
+        FROM notification WHERE task_id IN (?)`, taskIDs).Scan(&notificationsData).Error; err != nil {
 			select {
 			case errorChan <- fmt.Errorf("failed to fetch notifications: %w", err):
 			default:

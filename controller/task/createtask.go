@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
@@ -17,13 +16,11 @@ import (
 	"gorm.io/gorm"
 )
 
-// TaskService encapsulates task-related business logic
 type TaskService struct {
 	db              *gorm.DB
 	firestoreClient *firestore.Client
 }
 
-// NewTaskService creates a new TaskService instance
 func NewTaskService(db *gorm.DB, firestoreClient *firestore.Client) *TaskService {
 	return &TaskService{
 		db:              db,
@@ -44,7 +41,6 @@ func TodayTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *fires
 	}
 }
 
-// CreateTask with board
 func (s *TaskService) CreateTaskHandler(c *gin.Context) {
 	userId := c.MustGet("userId").(uint)
 
@@ -94,8 +90,6 @@ func (s *TaskService) CreateTaskHandler(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, response)
 }
-
-// CreateTodayTaskHandler handles today task creation (without board)
 func (s *TaskService) CreateTodayTaskHandler(c *gin.Context) {
 	userId := c.MustGet("userId").(uint)
 
@@ -119,12 +113,6 @@ func (s *TaskService) CreateTodayTaskHandler(c *gin.Context) {
 		return
 	}
 
-	// Handle Firestore operations (non-blocking)
-	// For today tasks, shouldSaveToFirestore is false (board-related)
-	if notification != nil {
-		go s.saveNotificationToFirestore(notification, user.Email, false)
-	}
-
 	// Prepare response
 	response := gin.H{
 		"message": "Task created successfully",
@@ -138,14 +126,12 @@ func (s *TaskService) CreateTodayTaskHandler(c *gin.Context) {
 	c.JSON(http.StatusCreated, response)
 }
 
-// getUserByID retrieves user by ID
 func (s *TaskService) getUserByID(userID uint) (*model.User, error) {
 	var user model.User
 	err := s.db.Where("user_id = ?", userID).First(&user).Error
 	return &user, err
 }
 
-// ตรวจสอบการเข้าถึงบอร์ด
 func (s *TaskService) validateBoardAccess(boardID int, userID uint) (bool, error) {
 	// Check if user is a board member
 	var boardUser model.BoardUser
@@ -168,7 +154,6 @@ func (s *TaskService) validateBoardAccess(boardID int, userID uint) (bool, error
 	return false, nil // User is board owner, don't save to Firestore
 }
 
-// สร้างงานใน sql
 func (s *TaskService) createTaskWithTransaction(taskReq *dto.CreateTaskRequest, user *model.User) (*model.Tasks, *model.Notification, error) {
 	tx := s.db.Begin()
 	if tx.Error != nil {
@@ -209,7 +194,6 @@ func (s *TaskService) createTaskWithTransaction(taskReq *dto.CreateTaskRequest, 
 	return task, notification, nil
 }
 
-// สร้างงานToday
 func (s *TaskService) createTodayTaskWithTransaction(taskReq *dto.CreateTodayTaskRequest, user *model.User) (*model.Tasks, *model.Notification, error) {
 	tx := s.db.Begin()
 	if tx.Error != nil {
@@ -250,7 +234,6 @@ func (s *TaskService) createTodayTaskWithTransaction(taskReq *dto.CreateTodayTas
 	return task, notification, nil
 }
 
-// สร้างการแจ้งเตือนใน sql
 func (s *TaskService) createNotificationInTx(tx *gorm.DB, taskID uint, reminder *dto.Reminder) (*model.Notification, error) {
 	parsedDueDate, err := parseDateTime(reminder.DueDate)
 	if err != nil {
@@ -261,8 +244,13 @@ func (s *TaskService) createNotificationInTx(tx *gorm.DB, taskID uint, reminder 
 		TaskID:           int(taskID),
 		DueDate:          parsedDueDate,
 		RecurringPattern: reminder.RecurringPattern,
-		IsSend:           parsedDueDate.Before(time.Now()),
-		CreatedAt:        time.Now(),
+		IsSend: func() string {
+			if parsedDueDate.Before(time.Now()) {
+				return "2"
+			}
+			return "0"
+		}(),
+		CreatedAt: time.Now(),
 	}
 
 	if err := tx.Create(notification).Error; err != nil {
@@ -272,27 +260,19 @@ func (s *TaskService) createNotificationInTx(tx *gorm.DB, taskID uint, reminder 
 	return notification, nil
 }
 
-// ตรวจสอบและบันทึกการดำเนินการ Firestore
 func (s *TaskService) handleFirestoreOperations(task *model.Tasks, notification *model.Notification, userEmail string, shouldSaveToFirestore bool) {
-	// ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	// defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// // Save task to Firestore if needed
-	// if shouldSaveToFirestore && task.BoardID != nil {
-	// 	if err := s.saveTaskToFirestore(ctx, task, int(*task.BoardID)); err != nil {
-	// 		log.Printf("Warning: Failed to save task to Firestore: %v", err)
-	// 	}
-	// }
-
-	// Save notification to Firestore if exists
-	if notification != nil {
-		if err := s.saveNotificationToFirestore(notification, userEmail, shouldSaveToFirestore); err != nil {
-			log.Printf("Warning: Failed to save notification to Firestore: %v", err)
+	// Save task to Firestore if needed
+	if shouldSaveToFirestore && task.BoardID != nil {
+		if err := s.saveTaskToFirestore(ctx, task, int(*task.BoardID)); err != nil {
+			fmt.Printf("Warning: Failed to save task to Firestore: %v", err)
 		}
 	}
+
 }
 
-// บันทึกงานใน Firestore
 func (s *TaskService) saveTaskToFirestore(ctx context.Context, task *model.Tasks, boardID int) error {
 	taskPath := fmt.Sprintf("Boards/%d/Tasks/%d", boardID, task.TaskID)
 	boardPath := fmt.Sprintf("BoardTasks/%d", task.TaskID)
@@ -331,41 +311,19 @@ func (s *TaskService) saveTaskToFirestore(ctx context.Context, task *model.Tasks
 	return err
 }
 
-// บันทึกการแจ้งเตือนใน Firestore
-func (s *TaskService) saveNotificationToFirestore(notification *model.Notification, email string, shouldSaveToFirestore bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+func respondWithError(c *gin.Context, statusCode int, message string, err error) {
+	response := gin.H{"error": message}
 
-	var notificationPath string
-
-	// แยก path ตาม shouldSaveToFirestore
-	if shouldSaveToFirestore {
-		// สำหรับ board tasks ที่ user เป็น board member
-		notificationPath = fmt.Sprintf("BoardTasks/%d/Notifications/%d", notification.TaskID, notification.NotificationID)
-	} else {
-		// สำหรับ today tasks หรือ board tasks ที่ user เป็น board owner
-		notificationPath = fmt.Sprintf("Notifications/%s/Tasks/%d", email, notification.NotificationID)
+	if err != nil {
+		// In development, you might want to include error details
+		// In production, log the error and return generic message
+		fmt.Printf("Error: %v", err)
+		response["details"] = err.Error()
 	}
 
-	notificationData := map[string]interface{}{
-		"notificationID": notification.NotificationID,
-		"taskID":         notification.TaskID,
-		"dueDate":        notification.DueDate,
-		"isSend":         notification.IsSend,
-		"createdAt":      notification.CreatedAt,
-		"updatedAt":      time.Now(),
-	}
-
-	// Add recurring pattern if exists
-	if notification.RecurringPattern != "" {
-		notificationData["recurringPattern"] = notification.RecurringPattern
-	}
-
-	_, err := s.firestoreClient.Doc(notificationPath).Set(ctx, notificationData)
-	return err
+	c.JSON(statusCode, response)
 }
 
-// Utility functions
 func stringToPtr(s string) *string {
 	if s == "" {
 		return nil
@@ -404,17 +362,4 @@ func parseDateTime(dateStr string) (time.Time, error) {
 	}
 
 	return time.Time{}, fmt.Errorf("unsupported date format: %s", dateStr)
-}
-
-func respondWithError(c *gin.Context, statusCode int, message string, err error) {
-	response := gin.H{"error": message}
-
-	if err != nil {
-		// In development, you might want to include error details
-		// In production, log the error and return generic message
-		log.Printf("Error: %v", err)
-		response["details"] = err.Error()
-	}
-
-	c.JSON(statusCode, response)
 }
