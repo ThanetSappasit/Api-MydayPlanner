@@ -134,6 +134,7 @@ func createFirebaseAssignment(firestoreClient *firestore.Client, assignment mode
 		"taskName":  task.TaskName, // Include task name for reference
 		"userName":  user.Name,     // Include user name for reference
 		"userEmail": user.Email,    // Include user email for reference
+		"update_at": time.Now(),    // Add update timestamp
 	}
 
 	// Create the document in Firebase

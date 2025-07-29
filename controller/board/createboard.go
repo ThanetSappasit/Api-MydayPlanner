@@ -161,6 +161,7 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 				"Type":           "Group",
 				"ShareToken":     deepLink,
 				"ShareExpiresAt": time.Now().Add(7 * 24 * time.Hour),
+				"update_at":      time.Now(),
 			}
 
 			boardDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(newBoard.BoardID))
@@ -183,12 +184,13 @@ func CreateBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 			}()
 
 			boardUserData := gin.H{
-				"BoardID": newBoard.BoardID,
-				"UserID":  user.UserID,
-				"Name":    user.Name,
-				"Profile": user.Profile,
-				"Email":   user.Email,
-				"AddedAt": time.Now(),
+				"BoardID":   newBoard.BoardID,
+				"UserID":    user.UserID,
+				"Name":      user.Name,
+				"Profile":   user.Profile,
+				"Email":     user.Email,
+				"AddedAt":   time.Now(),
+				"update_at": time.Now(),
 			}
 
 			userDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(newBoard.BoardID)).Collection("BoardUsers").Doc(strconv.Itoa(boardUser.BoardUserID))

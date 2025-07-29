@@ -176,6 +176,7 @@ func saveTaskToFirestore(ctx context.Context, client *firestore.Client, checklis
 		"checklist_name": checklist.ChecklistName,
 		"status":         checklist.Status,
 		"create_at":      checklist.CreateAt,
+		"update_at":      time.Now(),
 	}
 
 	_, err := client.Doc(taskPath).Set(ctx, taskData)

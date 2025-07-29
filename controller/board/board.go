@@ -139,6 +139,7 @@ func AdjustBoards(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 		// อัปเดต Firestore
 		_, err = firestoreDocRef.Update(ctx, []firestore.Update{
 			{Path: "BoardName", Value: boardName},
+			{Path: "update_at", Value: time.Now()},
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update board in Firestore"})
@@ -517,6 +518,7 @@ func NewBoardToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 	data := map[string]interface{}{
 		"ShareToken":     encodedParams,
 		"ShareExpiresAt": expireAt,
+		"update_at":      time.Now(),
 	}
 	if err := saveTaskToFirestore(ctx, firestoreClient, boardIDInt, data); err != nil {
 		fmt.Printf("Warning: Failed to save token to Firestore: %v\n", err)
@@ -610,11 +612,12 @@ func Addboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	boardDocRef := firestoreClient.Collection("Boards").Doc(strconv.Itoa(boardIDInt)).Collection("BoardUsers").Doc(strconv.Itoa(boardUser.BoardUserID))
 
 	boardUserData := map[string]interface{}{
-		"BoardID": boardIDInt,
-		"UserID":  user.UserID,
-		"Name":    user.Name,
-		"Profile": user.Profile,
-		"AddedAt": time.Now(),
+		"BoardID":   boardIDInt,
+		"UserID":    user.UserID,
+		"Name":      user.Name,
+		"Profile":   user.Profile,
+		"AddedAt":   time.Now(),
+		"update_at": time.Now(),
 	}
 
 	if _, err := boardDocRef.Set(ctx, boardUserData); err != nil {

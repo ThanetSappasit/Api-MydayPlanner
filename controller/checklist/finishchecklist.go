@@ -89,6 +89,7 @@ func CompleteChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.C
 			Doc(strconv.Itoa(checklistID)).
 			Update(ctx, []firestore.Update{
 				{Path: "status", Value: newStatus},
+				{Path: "update_at", Value: time.Now()},
 			})
 		if err != nil {
 			fmt.Printf("⚠️ Firestore update failed for checklist %d: %v\n", checklistID, err)

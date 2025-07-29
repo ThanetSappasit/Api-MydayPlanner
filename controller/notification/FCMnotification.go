@@ -2,120 +2,136 @@ package notification
 
 import (
 	"fmt"
-	"mydayplanner/model"
-	"net/http"
-	"time"
+	"os"
 
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"gorm.io/gorm"
 )
 
+// // NotificationRequest โครงสร้างข้อมูลสำหรับ request
+// type NotificationRequest struct {
+// 	Token    string            `json:"token" binding:"required"`
+// 	Title    string            `json:"title" binding:"required"`
+// 	Body     string            `json:"body" binding:"required"`
+// 	Data     map[string]string `json:"data,omitempty"`
+// 	ImageURL string            `json:"image_url,omitempty"`
+// }
+
+// // MulticastRequest โครงสร้างข้อมูลสำหรับส่งหลาย token
+// type MulticastRequest struct {
+// 	Tokens   []string          `json:"tokens" binding:"required"`
+// 	Title    string            `json:"title" binding:"required"`
+// 	Body     string            `json:"body" binding:"required"`
+// 	Data     map[string]string `json:"data,omitempty"`
+// 	ImageURL string            `json:"image_url,omitempty"`
+// }
+
+// NotificationProcessor handles notification processing fmtic
+type NotificationProcessor struct {
+	db              *gorm.DB
+	firestoreClient *firestore.Client
+}
+
+// // NotificationResult represents the result of sending a notification
+// type NotificationResult struct {
+// 	UserID           int    `json:"user_id"`
+// 	Email            string `json:"email"`
+// 	FCMToken         string `json:"fcm_token"`
+// 	NotificationSent bool   `json:"notification_sent"`
+// 	Error            string `json:"error,omitempty"`
+// }
+
+// // TaskNotificationData represents notification data for a task
+// type TaskNotificationData struct {
+// 	NotificationID    int                  `json:"notification_id"`
+// 	TaskID            int                  `json:"task_id"`
+// 	BoardID           int                  `json:"board_id"`
+// 	TaskName          string               `json:"task_name"`
+// 	DueDate           string               `json:"due_date"`
+// 	BeforeDueDate     string               `json:"before_due_date,omitempty"`
+// 	RecurringPattern  *string              `json:"recurring_pattern"`
+// 	IsGroup           bool                 `json:"is_group"`
+// 	TotalUsers        int                  `json:"total_users"`
+// 	NotificationsSent int                  `json:"notifications_sent"`
+// 	UserDetails       []NotificationResult `json:"user_details"`
+// 	CurrentStatus     string               `json:"current_status,omitempty"`
+// }
+
 func RemindNotificationTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	router.POST("/remindtask", func(c *gin.Context) {
-		RemindNotificationTask(c, db, firestoreClient)
+	router.POST("/single_notification", func(c *gin.Context) {
+		SendPushSingleNotification(c, db, firestoreClient)
+	})
+	router.POST("/multi_notification", func(c *gin.Context) {
+		SendPushMulticastNotification(c, db, firestoreClient)
 	})
 }
 
-func RemindNotificationTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-	// ดึงเวลาปัจจุบัน
-	now := time.Now()
-
-	var notificationList []gin.H
-
-	// Case 1: ดึง notifications ที่ถึงเวลา before_due และยังไม่ได้ส่ง (is_send = '0')
-	var beforeDueNotifications []model.Notification
-	err := db.Preload("Task").Where(
-		"is_send = ? AND beforedue_date IS NOT NULL AND beforedue_date <= ?",
-		"0", now,
-	).Find(&beforeDueNotifications).Error
-
-	if err != nil {
-		fmt.Printf("Error querying before due notifications: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to query before due notifications",
-		})
+// SendSingleNotification ส่ง notification ไปยัง device เดียว
+func SendPushSingleNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	var req NotificationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	// เพิ่ม before_due notifications ลงใน response
-	for _, notification := range beforeDueNotifications {
-		notificationData := gin.H{
-			"notification_id":   notification.NotificationID,
-			"task_id":           notification.TaskID,
-			"task_name":         notification.Task.TaskName,
-			"due_date":          notification.DueDate.Format("2006-01-02 15:04:05"),
-			"before_due_date":   notification.BeforeDueDate.Format("2006-01-02 15:04:05"),
-			"recurring_pattern": notification.RecurringPattern,
-			"notification_type": "before_due",
-			"time_status":       "Before due time reached",
-			"current_status":    "Ready to send before_due notification",
-			"action_needed":     "Send before_due notification and update is_send to '1'",
-		}
-		notificationList = append(notificationList, notificationData)
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: No .env file found or failed to load")
 	}
 
-	// Case 2: ดึง notifications ที่ถึงเวลา due_date
-	// แบ่งเป็น 2 กรณี:
-	// - กรณีที่ไม่มี before_due_date (is_send = '0')
-	// - กรณีที่มี before_due_date และส่ง before_due แล้ว (is_send = '1')
-	var dueNotifications []model.Notification
-	err = db.Preload("Task").Where(
-		"due_date <= ? AND ((beforedue_date IS NULL AND is_send = ?) OR (beforedue_date IS NOT NULL AND is_send = ?))",
-		now, "0", "1",
-	).Find(&dueNotifications).Error
-
-	if err != nil {
-		fmt.Printf("Error querying due notifications: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to query due notifications",
-		})
+	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
+	if serviceAccountKeyPath == "" {
+		c.JSON(500, gin.H{"error": "Firebase credentials not configured"})
 		return
 	}
 
-	// เพิ่ม due notifications ลงใน response
-	for _, notification := range dueNotifications {
-		notificationData := gin.H{
-			"notification_id":   notification.NotificationID,
-			"task_id":           notification.TaskID,
-			"task_name":         notification.Task.TaskName,
-			"due_date":          notification.DueDate.Format("2006-01-02 15:04:05"),
-			"recurring_pattern": notification.RecurringPattern,
-			"notification_type": "due",
-			"time_status":       "Due time reached",
-			"current_status":    "Ready to send due notification",
-			"action_needed":     "Send due notification and update is_send to '2'",
-		}
-
-		// เพิ่ม before_due_date ถ้ามี
-		if notification.BeforeDueDate != nil {
-			notificationData["before_due_date"] = notification.BeforeDueDate.Format("2006-01-02 15:04:05")
-			notificationData["current_status"] = "Before due sent, ready to send due notification"
-		} else {
-			notificationData["current_status"] = "Ready to send due notification (no before_due)"
-		}
-
-		notificationList = append(notificationList, notificationData)
+	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
+		return
 	}
 
-	// สรุปผลลัพธ์
-	totalFound := len(beforeDueNotifications) + len(dueNotifications)
-
-	response := gin.H{
-		"message":      "Notifications ready to send",
-		"current_time": now.Format("2006-01-02 15:04:05"),
-		"summary": gin.H{
-			"total_found":              totalFound,
-			"before_due_notifications": len(beforeDueNotifications),
-			"due_notifications":        len(dueNotifications),
-		},
-		"notifications": notificationList,
-		"next_step":     "Review the data and call send endpoint to proceed",
-		"instructions": gin.H{
-			"before_due": "Send notification and update is_send from '0' to '1'",
-			"due":        "Send notification and update is_send to '2' (from '0' or '1')",
-		},
+	err = sendPushNotification(app, req.Token, req.Title, req.Body, req.Data)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to send notification: " + err.Error()})
+		return
 	}
 
-	c.JSON(http.StatusOK, response)
+	c.JSON(200, gin.H{"message": "Notification sent successfully"})
+}
+
+// SendMulticastNotification ส่ง notification ไปยังหลาย devices
+func SendPushMulticastNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	var req MulticastRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: No .env file found or failed to load")
+	}
+
+	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
+	if serviceAccountKeyPath == "" {
+		c.JSON(500, gin.H{"error": "Firebase credentials not configured"})
+		return
+	}
+
+	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
+		return
+	}
+
+	err = sendMulticastNotification(app, req.Tokens, req.Title, req.Body, req.Data)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to send multicast notification: " + err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "Multicast notification sent successfully"})
 }

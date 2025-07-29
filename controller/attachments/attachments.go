@@ -140,6 +140,7 @@ func CreateAttachment(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 			"file_path":     attachment.FilePath,
 			"file_type":     attachment.FileType,
 			"upload_at":     attachment.UploadAt,
+			"update_at":     time.Now(),
 		})
 
 		if err != nil {
