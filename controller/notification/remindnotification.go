@@ -1,236 +1,289 @@
 package notification
 
 import (
-	"errors"
-	"mydayplanner/model"
-	"net/http"
-	"time"
+	"context"
+	"fmt"
+	"log"
+	"os"
 
 	"cloud.google.com/go/firestore"
+	firebase "firebase.google.com/go/v4"
+	"firebase.google.com/go/v4/messaging"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+	"google.golang.org/api/option"
 	"gorm.io/gorm"
 )
 
+// NotificationRequest โครงสร้างข้อมูลสำหรับ request
+type NotificationRequest struct {
+	Token    string            `json:"token" binding:"required"`
+	Title    string            `json:"title" binding:"required"`
+	Body     string            `json:"body" binding:"required"`
+	Data     map[string]string `json:"data,omitempty"`
+	ImageURL string            `json:"image_url,omitempty"`
+}
+
+// MulticastRequest โครงสร้างข้อมูลสำหรับส่งหลาย token
+type MulticastRequest struct {
+	Tokens   []string          `json:"tokens" binding:"required"`
+	Title    string            `json:"title" binding:"required"`
+	Body     string            `json:"body" binding:"required"`
+	Data     map[string]string `json:"data,omitempty"`
+	ImageURL string            `json:"image_url,omitempty"`
+}
+
 func PushNotificationTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	router.POST("/remindtask", func(c *gin.Context) {
-		RemindNotificationTask(c, db, firestoreClient)
+	// router.POST("/remindtask", func(c *gin.Context) {
+	// 	FCMtask(c, db, firestoreClient)
+	// })
+
+	// เพิ่ม endpoints สำหรับส่ง notification
+	router.POST("/send-notification", func(c *gin.Context) {
+		SendSingleNotification(c, db, firestoreClient)
+	})
+
+	router.POST("/send-multicast", func(c *gin.Context) {
+		SendMulticastNotification(c, db, firestoreClient)
 	})
 }
 
-func GetBoardByTaskID(taskID int, db *gorm.DB) (boardID interface{}, isInBoardUser bool, err error) {
-	// ค้นหา task เพื่อเอา board_id
-	var task model.Tasks
-	if err := db.First(&task, taskID).Error; err != nil {
-		return nil, false, err
+func FCMtask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: No .env file found or failed to load")
 	}
 
-	// ตรวจสอบว่า task มี board_id หรือไม่
-	if task.BoardID == nil {
-		// Task ไม่มี board_id แสดงว่าเป็น personal task (today task)
-		return "today", false, nil
-	}
-
-	boardIDValue := *task.BoardID
-	isInBoardUser = false
-
-	// ตรวจสอบใน board_user ก่อน
-	var boardUser model.BoardUser
-	if err := db.Where("board_id = ?", boardIDValue).First(&boardUser).Error; err == nil {
-		// พบใน board_user
-		isInBoardUser = true
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		// เกิดข้อผิดพลาดอื่น ๆ (ไม่ใช่ record not found)
-		return nil, false, err
-	}
-
-	// ถ้าไม่พบใน board_user ให้ตรวจสอบใน board
-	if !isInBoardUser {
-		var board model.Board
-		if err := db.First(&board, boardIDValue).Error; err != nil {
-			return nil, false, err
-		}
-	}
-
-	return boardIDValue, isInBoardUser, nil
-}
-
-func RemindNotificationTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-	var notificationIDs []string
-	currentTime := time.Now()
-
-	// Query เฉพาะ notification_id ของ notifications ที่ยังไม่ส่ง (is_send = false) และมี due_date ในวันนี้
-	if err := db.Model(&model.Notification{}).
-		Where("is_send = ? AND due_date <= ?", false, currentTime).
-		Pluck("notification_id", &notificationIDs).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch notification IDs"})
+	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
+	if serviceAccountKeyPath == "" {
+		c.JSON(500, gin.H{"error": "environment variable GOOGLE_APPLICATION_CREDENTIALS_1 is not set"})
 		return
 	}
 
-	// ตรวจสอบว่ามีข้อมูลหรือไม่
-	if len(notificationIDs) == 0 {
-		c.JSON(http.StatusOK, gin.H{
-			"message":          "No notification IDs found for today",
-			"count":            0,
-			"date":             currentTime.Format("2006-01-02"),
-			"notification_ids": []string{},
-		})
+	// สร้าง Firebase app
+	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
 		return
 	}
 
-	// สำหรับแต่ละ notification ให้ดึง task_id และหา board_id
-	var results []map[string]interface{}
-	for _, notificationID := range notificationIDs {
-		// ดึง notification เพื่อเอา task_id
-		var notification model.Notification
-		if err := db.Where("notification_id = ?", notificationID).First(&notification).Error; err != nil {
-			continue // ข้าม notification นี้หากมีปัญหา
-		}
+	// ตัวอย่างการส่ง notification
+	token := "YOUR_DEVICE_TOKEN_HERE" // ควรได้มาจาก database หรือ request
 
-		// หา board_id จาก task_id
-		boardID, isInBoardUser, err := GetBoardByTaskID(notification.TaskID, db)
-		if err != nil {
-			// หากมี error ในการ query
-			results = append(results, map[string]interface{}{
-				"notification_id":  notificationID,
-				"task_id":          notification.TaskID,
-				"board_id":         "today",
-				"is_in_board_user": false,
-				"error":            err.Error(),
-			})
-		} else {
-			results = append(results, map[string]interface{}{
-				"notification_id":  notificationID,
-				"task_id":          notification.TaskID,
-				"board_id":         boardID, // จะเป็น "today" หรือ board_id (int)
-				"is_in_board_user": isInBoardUser,
-			})
+	err = sendPushNotification(app, token, "Task Reminder", "You have a pending task!", nil)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to send notification: " + err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "Notification sent successfully"})
+}
+
+// SendSingleNotification ส่ง notification ไปยัง device เดียว
+func SendSingleNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	var req NotificationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: No .env file found or failed to load")
+	}
+
+	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
+	if serviceAccountKeyPath == "" {
+		c.JSON(500, gin.H{"error": "Firebase credentials not configured"})
+		return
+	}
+
+	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
+		return
+	}
+
+	err = sendPushNotification(app, req.Token, req.Title, req.Body, req.Data)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to send notification: " + err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "Notification sent successfully"})
+}
+
+// SendMulticastNotification ส่ง notification ไปยังหลาย devices
+func SendMulticastNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	var req MulticastRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: No .env file found or failed to load")
+	}
+
+	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
+	if serviceAccountKeyPath == "" {
+		c.JSON(500, gin.H{"error": "Firebase credentials not configured"})
+		return
+	}
+
+	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
+		return
+	}
+
+	err = sendMulticastNotification(app, req.Tokens, req.Title, req.Body, req.Data)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to send multicast notification: " + err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "Multicast notification sent successfully"})
+}
+
+// initializeFirebaseApp เริ่มต้น Firebase app
+func initializeFirebaseApp(serviceAccountKeyPath string) (*firebase.App, error) {
+	ctx := context.Background()
+
+	opt := option.WithCredentialsFile(serviceAccountKeyPath)
+	app, err := firebase.NewApp(ctx, nil, opt)
+	if err != nil {
+		return nil, fmt.Errorf("error initializing app: %v", err)
+	}
+
+	return app, nil
+}
+
+// sendPushNotification ส่ง notification ไปยัง device เดียว
+func sendPushNotification(app *firebase.App, token, title, body string, data map[string]string) error {
+	ctx := context.Background()
+
+	client, err := app.Messaging(ctx)
+	if err != nil {
+		return fmt.Errorf("error getting Messaging client: %v", err)
+	}
+
+	// สร้าง message
+	message := &messaging.Message{
+		Data: data,
+		Notification: &messaging.Notification{
+			Title: title,
+			Body:  body,
+		},
+		Token: token,
+	}
+
+	// ส่ง message
+	response, err := client.Send(ctx, message)
+	if err != nil {
+		return fmt.Errorf("error sending message: %v", err)
+	}
+
+	log.Printf("Successfully sent message: %s", response)
+	return nil
+}
+
+// sendMulticastNotification ส่ง notification ไปยังหลาย devices
+func sendMulticastNotification(app *firebase.App, tokens []string, title, body string, data map[string]string) error {
+	ctx := context.Background()
+
+	client, err := app.Messaging(ctx)
+	if err != nil {
+		return fmt.Errorf("error getting Messaging client: %v", err)
+	}
+
+	// สร้าง multicast message
+	message := &messaging.MulticastMessage{
+		Data: data,
+		Notification: &messaging.Notification{
+			Title: title,
+			Body:  body,
+		},
+		Tokens: tokens,
+	}
+
+	// ส่ง multicast message
+	response, err := client.SendMulticast(ctx, message)
+	if err != nil {
+		return fmt.Errorf("error sending multicast message: %v", err)
+	}
+
+	log.Printf("Successfully sent multicast message. Success: %d, Failure: %d",
+		response.SuccessCount, response.FailureCount)
+
+	// แสดงรายละเอียดของ failures
+	if response.FailureCount > 0 {
+		for idx, resp := range response.Responses {
+			if !resp.Success {
+				log.Printf("Failed to send to token %s: %v", tokens[idx], resp.Error)
+			}
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Today's unsent notifications with board info retrieved successfully",
-		"count":   len(notificationIDs),
-		"date":    currentTime.Format("2006-01-02"),
-		"results": results,
-	})
+	return nil
 }
 
-// ตัวอย่างการใช้งานในฟังก์ชันเดิม
-// func RemindNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-// 	var notificationIDs []string
-// 	currentTime := time.Now()
+// sendNotificationWithImage ส่ง notification พร้อมรูปภาพ
+func sendNotificationWithImage(app *firebase.App, token, title, body, imageURL string, data map[string]string) error {
+	ctx := context.Background()
 
-// 	// หาวันที่เริ่มต้นและสิ้นสุดของวันนี้
-// 	startOfDay := time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(), 0, 0, 0, 0, currentTime.Location())
-// 	endOfDay := time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(), 23, 59, 59, 999999999, currentTime.Location())
+	client, err := app.Messaging(ctx)
+	if err != nil {
+		return fmt.Errorf("error getting Messaging client: %v", err)
+	}
 
-// 	// Query เฉพาะ notification_id ของ notifications ที่ยังไม่ส่ง (is_send = false) และมี due_date ในวันนี้
-// 	if err := db.Model(&model.Notification{}).
-// 		Where("is_send = ? AND due_date >= ? AND due_date <= ?", false, startOfDay, endOfDay).
-// 		Pluck("notification_id", &notificationIDs).Error; err != nil {
-// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch notification IDs"})
-// 		return
-// 	}
+	// สร้าง message พร้อม image
+	message := &messaging.Message{
+		Data: data,
+		Notification: &messaging.Notification{
+			Title:    title,
+			Body:     body,
+			ImageURL: imageURL,
+		},
+		Token: token,
+	}
 
-// 	// ตรวจสอบว่ามีข้อมูลหรือไม่
-// 	if len(notificationIDs) == 0 {
-// 		c.JSON(http.StatusOK, gin.H{
-// 			"message":          "No notification IDs found for today",
-// 			"count":            0,
-// 			"date":             currentTime.Format("2006-01-02"),
-// 			"notification_ids": []string{},
-// 		})
-// 		return
-// 	}
+	// ส่ง message
+	response, err := client.Send(ctx, message)
+	if err != nil {
+		return fmt.Errorf("error sending message: %v", err)
+	}
 
-// 	// สำหรับแต่ละ notification ให้ดึง task_id และหา board_id
-// 	var results []map[string]interface{}
-// 	for _, notificationID := range notificationIDs {
-// 		// ดึง notification เพื่อเอา task_id
-// 		var notification model.Notification
-// 		if err := db.Where("notification_id = ?", notificationID).First(&notification).Error; err != nil {
-// 			continue // ข้าม notification นี้หากมีปัญหา
-// 		}
+	log.Printf("Successfully sent message with image: %s", response)
+	return nil
+}
 
-// 		// หา board_id จาก task_id
-// 		boardID, isInBoardUser, err := GetBoardByTaskID(notification.TaskID, db)
-// 		if err != nil {
-// 			// หากไม่พบ board ให้ใส่ค่า default
-// 			results = append(results, map[string]interface{}{
-// 				"notification_id":  notificationID,
-// 				"task_id":          notification.TaskID,
-// 				"board_id":         nil,
-// 				"is_in_board_user": false,
-// 				"error":            err.Error(),
-// 			})
-// 			continue
-// 		}
+// sendToTopic ส่ง notification ไปยัง topic
+func sendToTopic(app *firebase.App, topic, title, body string, data map[string]string) error {
+	ctx := context.Background()
 
-// 		// Query ข้อมูลจาก Firestore ตาม path ที่เหมาะสม
-// 		var firestoreData map[string]interface{}
-// 		var firestorePath string
+	client, err := app.Messaging(ctx)
+	if err != nil {
+		return fmt.Errorf("error getting Messaging client: %v", err)
+	}
 
-// 		if isInBoardUser {
-// 			// กรณี board_id เป็น true: /BoardTasks/taskid/Notifications/notificationid
-// 			firestorePath = fmt.Sprintf("BoardTasks/%d/Notifications/%s", notification.TaskID, notificationID)
-// 		} else {
-// 			// กรณี board_id เป็น false: /Notifications/user.email/Tasks/notificationid
-// 			// ต้องหา user email จาก task's create_by
-// 			var task model.Tasks
-// 			if err := db.Preload("Creator").First(&task, notification.TaskID).Error; err != nil {
-// 				results = append(results, map[string]interface{}{
-// 					"notification_id":  notificationID,
-// 					"task_id":          notification.TaskID,
-// 					"board_id":         boardID,
-// 					"is_in_board_user": isInBoardUser,
-// 					"error":            "Failed to fetch task creator",
-// 				})
-// 				continue
-// 			}
+	// สร้าง message สำหรับ topic
+	message := &messaging.Message{
+		Data: data,
+		Notification: &messaging.Notification{
+			Title: title,
+			Body:  body,
+		},
+		Topic: topic,
+	}
 
-// 			if task.Creator == nil {
-// 				results = append(results, map[string]interface{}{
-// 					"notification_id":  notificationID,
-// 					"task_id":          notification.TaskID,
-// 					"board_id":         boardID,
-// 					"is_in_board_user": isInBoardUser,
-// 					"error":            "Task creator not found",
-// 				})
-// 				continue
-// 			}
+	// ส่ง message
+	response, err := client.Send(ctx, message)
+	if err != nil {
+		return fmt.Errorf("error sending message to topic: %v", err)
+	}
 
-// 			firestorePath = fmt.Sprintf("Notifications/%s/Tasks/%s", task.Creator.Email, notificationID)
-// 		}
-
-// 		// Query จาก Firestore
-// 		doc, err := firestoreClient.Doc(firestorePath).Get(context.Background())
-// 		if err != nil {
-// 			results = append(results, map[string]interface{}{
-// 				"notification_id":  notificationID,
-// 				"task_id":          notification.TaskID,
-// 				"board_id":         boardID,
-// 				"is_in_board_user": isInBoardUser,
-// 				"firestore_path":   firestorePath,
-// 				"firestore_data":   nil,
-// 				"firestore_error":  err.Error(),
-// 			})
-// 		} else {
-// 			firestoreData = doc.Data()
-// 			results = append(results, map[string]interface{}{
-// 				"notification_id":  notificationID,
-// 				"task_id":          notification.TaskID,
-// 				"board_id":         boardID,
-// 				"is_in_board_user": isInBoardUser,
-// 				"firestore_path":   firestorePath,
-// 				"firestore_data":   firestoreData,
-// 			})
-// 		}
-// 	}
-
-// 	c.JSON(http.StatusOK, gin.H{
-// 		"message": "Today's unsent notifications with board and firestore data retrieved successfully",
-// 		"count":   len(notificationIDs),
-// 		"date":    currentTime.Format("2006-01-02"),
-// 		"results": results,
-// 	})
-// }
+	log.Printf("Successfully sent message to topic %s: %s", topic, response)
+	return nil
+}
