@@ -58,8 +58,7 @@ func StartServer() {
 	assigned.AssignedController(router, DB, FB)
 
 	notification.NotificationTaskController(router, DB, FB)
-	notification.PushNotificationTaskController(router, DB, FB)
-	notification.RemindNotificationTaskController(router, DB, FB)
+	notification.SendNotificationTaskController(router, DB, FB)
 
 	checklist.CreateChecklistController(router, DB, FB)
 	checklist.UpdateChecklistController(router, DB, FB)
