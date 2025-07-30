@@ -6,6 +6,7 @@ import (
 	"log"
 	"mydayplanner/model"
 	"os"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -34,12 +35,29 @@ type TaskInfo struct {
 	BoardID interface{}
 }
 
+// UserTokenInfo เก็บ cache ของ user tokens
+type UserTokenInfo struct {
+	Email string
+	Token string
+}
+
 // NotificationProcessor จัดการการประมวลผล notification
 type NotificationProcessor struct {
 	db              *gorm.DB
 	firestoreClient *firestore.Client
 	app             *firebase.App
-	taskCache       map[int]*TaskInfo // cache ข้อมูล task เพื่อไม่ต้อง query ซ้ำ
+	taskCache       map[int]*TaskInfo         // cache ข้อมูล task
+	userTokenCache  map[string]string         // cache FCM tokens โดยใช้ email เป็น key
+	boardUserCache  map[int][]model.BoardUser // cache board users
+	userCache       map[int]model.User        // cache users
+	mu              sync.RWMutex              // mutex สำหรับ thread safety
+}
+
+// NotificationBatch สำหรับประมวลผลแบบ batch
+type NotificationBatch struct {
+	Notification model.Notification
+	UpdateIsSend string
+	ShouldSend   bool
 }
 
 func SendNotificationTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -88,23 +106,48 @@ func SendNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		firestoreClient: firestoreClient,
 		app:             app,
 		taskCache:       make(map[int]*TaskInfo),
+		userTokenCache:  make(map[string]string),
+		boardUserCache:  make(map[int][]model.BoardUser),
+		userCache:       make(map[int]model.User),
 	}
+
+	// Preload ข้อมูลที่จำเป็น
+	processor.preloadData(notifications)
 
 	successCount := 0
 	errorCount := 0
 
-	// ประมวลผลแต่ละ notification
-	for _, notification := range notifications {
-		shouldSend, updateIsSend := processor.shouldSendNotification(notification, now)
+	// สร้าง batches สำหรับการประมวลผล
+	batches := processor.prepareBatches(notifications, now)
 
-		if shouldSend {
-			if processor.processNotification(notification, updateIsSend, now, db) {
-				successCount++
-			} else {
-				errorCount++
-			}
+	// ประมวลผลแบบ concurrent
+	const maxWorkers = 10
+	semaphore := make(chan struct{}, maxWorkers)
+	var wg sync.WaitGroup
+	var resultMu sync.Mutex
+
+	for _, batch := range batches {
+		if batch.ShouldSend {
+			wg.Add(1)
+			go func(b NotificationBatch) {
+				defer wg.Done()
+				semaphore <- struct{}{}        // acquire semaphore
+				defer func() { <-semaphore }() // release semaphore
+
+				if processor.processNotificationConcurrent(b.Notification, b.UpdateIsSend, now, db) {
+					resultMu.Lock()
+					successCount++
+					resultMu.Unlock()
+				} else {
+					resultMu.Lock()
+					errorCount++
+					resultMu.Unlock()
+				}
+			}(batch)
 		}
 	}
+
+	wg.Wait()
 
 	c.JSON(200, gin.H{
 		"message":       "Notifications processed successfully",
@@ -115,36 +158,135 @@ func SendNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 	})
 }
 
+// preloadData โหลดข้อมูลที่จำเป็นล่วงหน้าเพื่อลด database queries
+func (p *NotificationProcessor) preloadData(notifications []model.Notification) {
+	// เก็บ task IDs ที่ unique
+	taskIDs := make(map[int]bool)
+	boardIDs := make(map[int]bool)
+
+	for _, noti := range notifications {
+		taskIDs[noti.TaskID] = true
+		if noti.Task.BoardID != nil {
+			boardIDs[*noti.Task.BoardID] = true
+		}
+	}
+
+	// Preload board users สำหรับทุก board
+	var allBoardUsers []model.BoardUser
+	var boardIDList []int
+	for boardID := range boardIDs {
+		boardIDList = append(boardIDList, boardID)
+	}
+
+	if len(boardIDList) > 0 {
+		p.db.Where("board_id IN ?", boardIDList).Find(&allBoardUsers)
+
+		// จัดกลุ่ม board users ตาม board_id
+		for _, bu := range allBoardUsers {
+			p.boardUserCache[bu.BoardID] = append(p.boardUserCache[bu.BoardID], bu)
+		}
+	}
+
+	// Preload users
+	userIDs := make(map[int]bool)
+	for _, bu := range allBoardUsers {
+		userIDs[bu.UserID] = true
+	}
+
+	// เพิ่ม creator IDs
+	for _, noti := range notifications {
+		if noti.Task.CreateBy != nil {
+			userIDs[*noti.Task.CreateBy] = true
+		}
+	}
+
+	var userIDList []int
+	for userID := range userIDs {
+		userIDList = append(userIDList, userID)
+	}
+
+	if len(userIDList) > 0 {
+		var users []model.User
+		p.db.Where("user_id IN ?", userIDList).Find(&users)
+
+		for _, user := range users {
+			p.userCache[user.UserID] = user
+		}
+
+		// Preload FCM tokens
+		p.preloadTokens(users)
+	}
+}
+
+// preloadTokens โหลด FCM tokens จาก Firestore แบบ batch
+func (p *NotificationProcessor) preloadTokens(users []model.User) {
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 5) // จำกัด concurrent Firestore calls
+
+	for _, user := range users {
+		wg.Add(1)
+		go func(u model.User) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			doc, err := p.firestoreClient.Collection("usersLogin").Doc(u.Email).Get(ctx)
+			if err == nil && doc.Exists() {
+				data := doc.Data()
+				if fcmToken, ok := data["FMCToken"].(string); ok && fcmToken != "" {
+					p.mu.Lock()
+					p.userTokenCache[u.Email] = fcmToken
+					p.mu.Unlock()
+				}
+			}
+		}(user)
+	}
+	wg.Wait()
+}
+
+// prepareBatches เตรียม batches สำหรับการประมวลผล
+func (p *NotificationProcessor) prepareBatches(notifications []model.Notification, now time.Time) []NotificationBatch {
+	batches := make([]NotificationBatch, 0, len(notifications))
+
+	for _, notification := range notifications {
+		shouldSend, updateIsSend := p.shouldSendNotification(notification, now)
+		batches = append(batches, NotificationBatch{
+			Notification: notification,
+			UpdateIsSend: updateIsSend,
+			ShouldSend:   shouldSend,
+		})
+	}
+
+	return batches
+}
+
 // shouldSendNotification ตรวจสอบว่าควรส่ง notification หรือไม่
 func (p *NotificationProcessor) shouldSendNotification(notification model.Notification, now time.Time) (bool, string) {
 	if notification.IsSend == "0" {
-		// กรณี is_send = 0: ตรวจสอบ beforedue_date ก่อน
 		if notification.BeforeDueDate != nil && (notification.BeforeDueDate.Before(now) || notification.BeforeDueDate.Equal(now)) {
-			return true, "1" // เปลี่ยนเป็น 1 หลังส่ง beforedue_date
+			return true, "1"
 		} else if notification.BeforeDueDate == nil && (notification.DueDate.Before(now) || notification.DueDate.Equal(now)) {
-			return true, "2" // เปลี่ยนเป็น 2 หลังส่ง due_date
+			return true, "2"
 		}
 	} else if notification.IsSend == "1" {
-		// กรณี is_send = 1: ตรวจสอบเฉพาะ due_date
 		if notification.DueDate.Before(now) || notification.DueDate.Equal(now) {
-			return true, "2" // เปลี่ยนเป็น 2 หลังส่ง due_date
+			return true, "2"
 		}
 	}
 	return false, ""
 }
 
-// processNotification ประมวลผล notification แต่ละตัว
-func (p *NotificationProcessor) processNotification(notification model.Notification, updateIsSend string, now time.Time, db *gorm.DB) bool {
+// processNotificationConcurrent ประมวลผล notification แบบ concurrent-safe
+func (p *NotificationProcessor) processNotificationConcurrent(notification model.Notification, updateIsSend string, now time.Time, db *gorm.DB) bool {
 	fmt.Printf("Sending notification for Task ID: %d\n", notification.TaskID)
 
-	// สร้างข้อความแจ้งเตือน
 	message := buildNotificationMessage(notification)
 	if message == "" {
 		return false
 	}
 
-	// ดึงข้อมูล task (ใช้ cache ถ้ามี)
-	taskInfo, err := p.getTaskInfo(notification.TaskID)
+	taskInfo, err := p.getTaskInfoOptimized(notification.TaskID)
 	if err != nil {
 		log.Printf("Failed to get task info for Task ID %d: %v", notification.TaskID, err)
 		return false
@@ -161,53 +303,47 @@ func (p *NotificationProcessor) processNotification(notification model.Notificat
 		return false
 	}
 
-	// สร้าง data payload
 	data := map[string]string{
 		"taskid":    fmt.Sprintf("%d", notification.TaskID),
 		"timestamp": timestamp,
 		"boardid":   fmt.Sprintf("%v", taskInfo.BoardID),
 	}
 
-	// ส่งการแจ้งเตือน
 	err = sendMulticastNotification(p.app, taskInfo.Tokens, "แจ้งเตือนงาน", message, data)
 	if err != nil {
 		log.Printf("Failed to send notification for Task ID %d: %v", notification.TaskID, err)
 		return false
 	}
 
-	// อัพเดท is_send status ใน database
 	if err := p.db.Model(&notification).Update("is_send", updateIsSend).Error; err != nil {
 		log.Printf("Failed to update notification %d: %v", notification.NotificationID, err)
 		return false
 	}
 
-	// อัพเดท Firestore
 	updateFirestoreNotification(p.firestoreClient, notification, taskInfo.IsGroup, updateIsSend, db)
-
 	return true
 }
 
-// getTaskInfo ดึงข้อมูล task พร้อมใช้ cache
-func (p *NotificationProcessor) getTaskInfo(taskID int) (*TaskInfo, error) {
-	// ตรวจสอบ cache ก่อน
+// getTaskInfoOptimized ดึงข้อมูล task โดยใช้ cache ที่ preload แล้ว
+func (p *NotificationProcessor) getTaskInfoOptimized(taskID int) (*TaskInfo, error) {
+	p.mu.RLock()
 	if info, exists := p.taskCache[taskID]; exists {
+		p.mu.RUnlock()
 		return info, nil
 	}
+	p.mu.RUnlock()
 
-	// ดึงข้อมูล task
 	var task model.Tasks
 	if err := p.db.First(&task, taskID).Error; err != nil {
 		return nil, fmt.Errorf("failed to find task: %v", err)
 	}
 
-	// ตรวจสอบว่าเป็น group task หรือไม่
-	isGroup, err := p.isGroupTask(task)
+	isGroup, err := p.isGroupTaskOptimized(task)
 	if err != nil {
 		return nil, fmt.Errorf("error checking if task is group: %v", err)
 	}
 
-	// ดึง users และ tokens
-	users, tokens, err := p.getUsersAndTokens(task)
+	users, tokens, err := p.getUsersAndTokensOptimized(task)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get users and tokens: %v", err)
 	}
@@ -217,17 +353,81 @@ func (p *NotificationProcessor) getTaskInfo(taskID int) (*TaskInfo, error) {
 		boardID = fmt.Sprintf("%d", *task.BoardID)
 	}
 
-	// สร้าง TaskInfo และเก็บใน cache
 	taskInfo := &TaskInfo{
 		Task:    task,
 		Users:   users,
 		Tokens:  tokens,
 		IsGroup: isGroup,
-		BoardID: boardID, // ✅ ใช้ค่าที่ตรวจสอบแล้ว
+		BoardID: boardID,
 	}
 
+	p.mu.Lock()
 	p.taskCache[taskID] = taskInfo
+	p.mu.Unlock()
+
 	return taskInfo, nil
+}
+
+// getUsersAndTokensOptimized ใช้ cache แทนการ query database
+func (p *NotificationProcessor) getUsersAndTokensOptimized(task model.Tasks) ([]model.User, []string, error) {
+	var users []model.User
+	var tokens []string
+
+	if task.BoardID != nil {
+		// ใช้ cached board users
+		p.mu.RLock()
+		boardUsers, exists := p.boardUserCache[*task.BoardID]
+		p.mu.RUnlock()
+
+		if exists && len(boardUsers) > 0 {
+			for _, boardUser := range boardUsers {
+				if user, userExists := p.userCache[boardUser.UserID]; userExists {
+					users = append(users, user)
+					if token, tokenExists := p.userTokenCache[user.Email]; tokenExists {
+						tokens = append(tokens, token)
+					}
+				}
+			}
+		} else {
+			// ไม่มี users ใน BoardUser ให้ดู CreatedBy ใน Board
+			var board model.Board
+			if err := p.db.First(&board, *task.BoardID).Error; err != nil {
+				return nil, nil, fmt.Errorf("failed to find board: %v", err)
+			}
+
+			if user, exists := p.userCache[board.CreatedBy]; exists {
+				users = append(users, user)
+				if token, tokenExists := p.userTokenCache[user.Email]; tokenExists {
+					tokens = append(tokens, token)
+				}
+			}
+		}
+	} else {
+		// ไม่มี board_id ให้ใช้ CreateBy ใน Tasks
+		if task.CreateBy != nil {
+			if user, exists := p.userCache[*task.CreateBy]; exists {
+				users = append(users, user)
+				if token, tokenExists := p.userTokenCache[user.Email]; tokenExists {
+					tokens = append(tokens, token)
+				}
+			}
+		}
+	}
+
+	return users, tokens, nil
+}
+
+// isGroupTaskOptimized ใช้ cached data
+func (p *NotificationProcessor) isGroupTaskOptimized(task model.Tasks) (bool, error) {
+	if task.BoardID == nil {
+		return false, nil
+	}
+
+	p.mu.RLock()
+	boardUsers, exists := p.boardUserCache[*task.BoardID]
+	p.mu.RUnlock()
+
+	return exists && len(boardUsers) > 0, nil
 }
 
 func (p *NotificationProcessor) getTimeInfo(updateIsSend string, notification model.Notification) (string, error) {
@@ -240,94 +440,6 @@ func (p *NotificationProcessor) getTimeInfo(updateIsSend string, notification mo
 		return "", fmt.Errorf("invalid update status: %s", updateIsSend)
 	}
 	return timestamp, nil
-}
-
-// getUsersAndTokens ดึง users และ FCM tokens ในครั้งเดียว
-func (p *NotificationProcessor) getUsersAndTokens(task model.Tasks) ([]model.User, []string, error) {
-	var userIDs []int
-
-	// ตรวจสอบว่ามี board_id หรือไม่
-	if task.BoardID != nil {
-		// ค้นหา users ใน BoardUser
-		var boardUsers []model.BoardUser
-		if err := p.db.Where("board_id = ?", *task.BoardID).Find(&boardUsers).Error; err != nil {
-			return nil, nil, fmt.Errorf("failed to find board users: %v", err)
-		}
-
-		if len(boardUsers) > 0 {
-			// มี users ใน board
-			for _, boardUser := range boardUsers {
-				userIDs = append(userIDs, boardUser.UserID)
-			}
-		} else {
-			// ไม่มี users ใน BoardUser ให้ดู CreatedBy ใน Board
-			var board model.Board
-			if err := p.db.First(&board, *task.BoardID).Error; err != nil {
-				return nil, nil, fmt.Errorf("failed to find board: %v", err)
-			}
-			userIDs = append(userIDs, board.CreatedBy)
-		}
-	} else {
-		// ไม่มี board_id ให้ใช้ CreateBy ใน Tasks
-		if task.CreateBy != nil {
-			userIDs = append(userIDs, *task.CreateBy)
-		} else {
-			return nil, nil, fmt.Errorf("no user found for task %d", task.TaskID)
-		}
-	}
-
-	// ดึง users
-	var users []model.User
-	if err := p.db.Where("user_id IN ?", userIDs).Find(&users).Error; err != nil {
-		return nil, nil, fmt.Errorf("failed to find users: %v", err)
-	}
-
-	// ดึง FCM tokens จาก Firestore
-	var tokens []string
-	ctx := context.Background()
-	for _, user := range users {
-		doc, err := p.firestoreClient.Collection("usersLogin").Doc(user.Email).Get(ctx)
-		if err != nil {
-			log.Printf("Failed to get Firestore doc for email %s: %v", user.Email, err)
-			continue
-		}
-
-		if doc.Exists() {
-			data := doc.Data()
-			if fcmToken, ok := data["FMCToken"].(string); ok && fcmToken != "" {
-				tokens = append(tokens, fcmToken)
-			}
-		}
-	}
-
-	return users, tokens, nil
-}
-
-// isGroupTask ตรวจสอบว่าเป็น group task หรือไม่
-func (p *NotificationProcessor) isGroupTask(task model.Tasks) (bool, error) {
-	// ไม่มี board_id = personal task
-	if task.BoardID == nil {
-		return false, nil
-	}
-
-	// ตรวจสอบว่ามี users ใน BoardUser หรือไม่
-	var boardUserCount int64
-	if err := p.db.Model(&model.BoardUser{}).Where("board_id = ?", *task.BoardID).Count(&boardUserCount).Error; err != nil {
-		return false, fmt.Errorf("failed to count board users: %v", err)
-	}
-
-	// ถ้ามี users ใน board = group task
-	if boardUserCount > 0 {
-		return true, nil
-	}
-
-	// ถ้าไม่มี users ใน BoardUser ให้ตรวจสอบ creator
-	var board model.Board
-	if err := p.db.First(&board, *task.BoardID).Error; err != nil {
-		return false, fmt.Errorf("failed to find board: %v", err)
-	}
-
-	return false, nil
 }
 
 func initializeFirebaseApp(serviceAccountKeyPath string) (*firebase.App, error) {
@@ -343,7 +455,6 @@ func initializeFirebaseApp(serviceAccountKeyPath string) (*firebase.App, error) 
 func buildNotificationMessage(noti model.Notification) string {
 	taskName := noti.Task.TaskName
 
-	// ตรวจสอบว่าเป็นการแจ้งเตือน beforedue_date หรือ due_date
 	if noti.BeforeDueDate != nil && noti.IsSend == "0" {
 		return fmt.Sprintf("⏰ ใกล้ถึงเวลา: %s", taskName)
 	} else if noti.IsSend == "1" || (noti.BeforeDueDate == nil && noti.IsSend == "0") {
@@ -361,27 +472,38 @@ func sendMulticastNotification(app *firebase.App, tokens []string, title, body s
 		return fmt.Errorf("error getting Messaging client: %v", err)
 	}
 
-	message := &messaging.MulticastMessage{
-		Data: data,
-		Notification: &messaging.Notification{
-			Title: title,
-			Body:  body,
-		},
-		Tokens: tokens,
-	}
+	// แบ่ง tokens เป็น batches (FCM จำกัดที่ 500 tokens ต่อ request)
+	const batchSize = 500
+	for i := 0; i < len(tokens); i += batchSize {
+		end := i + batchSize
+		if end > len(tokens) {
+			end = len(tokens)
+		}
 
-	response, err := client.SendEachForMulticast(ctx, message)
-	if err != nil {
-		return fmt.Errorf("error sending multicast message: %v", err)
-	}
+		batch := tokens[i:end]
+		message := &messaging.MulticastMessage{
+			Data: data,
+			Notification: &messaging.Notification{
+				Title: title,
+				Body:  body,
+			},
+			Tokens: batch,
+		}
 
-	log.Printf("Successfully sent multicast message. Success: %d, Failure: %d",
-		response.SuccessCount, response.FailureCount)
+		response, err := client.SendEachForMulticast(ctx, message)
+		if err != nil {
+			log.Printf("Error sending batch %d-%d: %v", i, end-1, err)
+			continue
+		}
 
-	if response.FailureCount > 0 {
-		for idx, resp := range response.Responses {
-			if !resp.Success {
-				log.Printf("Failed to send to token %s: %v", tokens[idx], resp.Error)
+		log.Printf("Batch %d-%d: Success: %d, Failure: %d",
+			i, end-1, response.SuccessCount, response.FailureCount)
+
+		if response.FailureCount > 0 {
+			for idx, resp := range response.Responses {
+				if !resp.Success {
+					log.Printf("Failed to send to token %s: %v", batch[idx], resp.Error)
+				}
 			}
 		}
 	}
@@ -393,21 +515,17 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 	ctx := context.Background()
 
 	var docPath string
-	// อัพเดท is_send status ใน Firestore
 	updateData := map[string]interface{}{
 		"isSend": newStatus,
 	}
 
 	if isGroup {
-		// Group task: /BoardTasks/taskid/Notifications/notiid
 		docPath = fmt.Sprintf("BoardTasks/%d/Notifications/%d", notification.TaskID, notification.NotificationID)
 
 		if newStatus == "1" {
-			// ดึงข้อมูล BoardUsers จาก database
 			var boardUsers []model.BoardUser
 			var task model.Tasks
 
-			// ดึง task เพื่อได้ board_id
 			if err := db.First(&task, notification.TaskID).Error; err != nil {
 				return fmt.Errorf("failed to find task: %v", err)
 			}
@@ -416,12 +534,10 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				return fmt.Errorf("task has no board_id")
 			}
 
-			// ดึง board users
 			if err := db.Where("board_id = ?", *task.BoardID).Find(&boardUsers).Error; err != nil {
 				return fmt.Errorf("failed to find board users: %v", err)
 			}
 
-			// เตรียม update data สำหรับ group notification
 			updateData["notiCount"] = false
 			updateData["isNotiRemind"] = true
 			updateData["isNotiRemindShow"] = true
@@ -429,8 +545,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 			updateData["remindMeBeforeOld"] = firestore.Delete
 			updateData["updatedAt"] = time.Now().UTC()
 
-			// อัพเดท userNotifications สำหรับแต่ละ user ใน board
-			// สร้าง nested map structure สำหรับ userNotifications
 			userNotifications := make(map[string]interface{})
 			for _, boardUser := range boardUsers {
 				userIDStr := fmt.Sprintf("%d", boardUser.UserID)
@@ -445,7 +559,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				var boardUsers []model.BoardUser
 				var task model.Tasks
 
-				// ดึง task เพื่อได้ board_id
 				if err := db.First(&task, notification.TaskID).Error; err != nil {
 					return fmt.Errorf("failed to find task: %v", err)
 				}
@@ -454,7 +567,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 					return fmt.Errorf("task has no board_id")
 				}
 
-				// ดึง board users
 				if err := db.Where("board_id = ?", *task.BoardID).Find(&boardUsers).Error; err != nil {
 					return fmt.Errorf("failed to find board users: %v", err)
 				}
@@ -462,7 +574,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				updateData["notiCount"] = false
 				updateData["updatedAt"] = time.Now().UTC()
 
-				// สำหรับการลบฟิลด์ใน Firestore ใช้ firestore.Delete
 				updateData["dueDateOld"] = firestore.Delete
 				updateData["remindMeBeforeOld"] = firestore.Delete
 				userNotifications := make(map[string]interface{})
@@ -477,7 +588,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				var boardUsers []model.BoardUser
 				var task model.Tasks
 
-				// ดึง task เพื่อได้ board_id
 				if err := db.First(&task, notification.TaskID).Error; err != nil {
 					return fmt.Errorf("failed to find task: %v", err)
 				}
@@ -486,7 +596,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 					return fmt.Errorf("task has no board_id")
 				}
 
-				// ดึง board users
 				if err := db.Where("board_id = ?", *task.BoardID).Find(&boardUsers).Error; err != nil {
 					return fmt.Errorf("failed to find board users: %v", err)
 				}
@@ -501,10 +610,10 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				updateData["notiCount"] = false
 
 				if notification.BeforeDueDate != nil {
-					nextRemindMeBefore := notification.BeforeDueDate.AddDate(0, 0, 1) // ตัวอย่าง: เพิ่มวันถัดไป
+					nextRemindMeBefore := notification.BeforeDueDate.AddDate(0, 0, 1)
 					updateData["remindMeBefore"] = nextRemindMeBefore
 				} else {
-					updateData["remindMeBefore"] = nil // ถ้าไม่มี beforedue_date ให้เป็น nil
+					updateData["remindMeBefore"] = nil
 				}
 
 				userNotifications := make(map[string]interface{})
@@ -518,11 +627,9 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 					}
 				}
 				updateData["userNotifications"] = userNotifications
-
 			}
 		}
 	} else {
-		// Personal task: /Notifications/email/Tasks/notiid
 		email, err := getTaskOwnerEmail(db, notification.TaskID)
 		if err != nil {
 			return fmt.Errorf("failed to get task owner email: %v", err)
@@ -535,7 +642,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 			updateData["isNotiRemindShow"] = true
 			updateData["updatedAt"] = time.Now().UTC()
 
-			// สำหรับการลบฟิลด์ใน Firestore ใช้ firestore.Delete
 			updateData["dueDateOld"] = firestore.Delete
 			updateData["remindMeBeforeOld"] = firestore.Delete
 		} else if newStatus == "2" {
@@ -544,12 +650,9 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				updateData["notiCount"] = false
 				updateData["updatedAt"] = time.Now().UTC()
 
-				// สำหรับการลบฟิลด์ใน Firestore ใช้ firestore.Delete
 				updateData["dueDateOld"] = firestore.Delete
 				updateData["remindMeBeforeOld"] = firestore.Delete
 			} else {
-				// สำหรับ recurring notifications (ไม่ใช่ onetime)
-				// คำนวณ nextDueDate (คุณอาจต้องใช้ logic ที่เหมาะสมตาม recurring pattern)
 				nextDueDate := calculateNextDueDate(notification)
 
 				updateData["dueDate"] = nextDueDate
@@ -561,13 +664,12 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				updateData["notiCount"] = false
 
 				if notification.BeforeDueDate != nil {
-					nextRemindMeBefore := notification.BeforeDueDate.AddDate(0, 0, 1) // ตัวอย่าง: เพิ่มวันถัดไป
+					nextRemindMeBefore := notification.BeforeDueDate.AddDate(0, 0, 1)
 					updateData["remindMeBefore"] = nextRemindMeBefore
 				} else {
-					updateData["remindMeBefore"] = nil // ถ้าไม่มี beforedue_date ให้เป็น nil
+					updateData["remindMeBefore"] = nil
 				}
 			}
-
 		}
 	}
 
@@ -598,8 +700,7 @@ func getTaskOwnerEmail(db *gorm.DB, taskID int) (string, error) {
 	return user.Email, nil
 }
 
-// Helper function สำหรับคำนวณ next due date ตาม recurring pattern
 func calculateNextDueDate(notification model.Notification) time.Time {
-	notification.DueDate = notification.DueDate.AddDate(0, 0, 1) // ตัวอย่าง: เพิ่มวันถัดไป
+	notification.DueDate = notification.DueDate.AddDate(0, 0, 1)
 	return notification.DueDate
 }
