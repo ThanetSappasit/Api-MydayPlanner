@@ -26,6 +26,9 @@ func RemindNotificationTaskController(router *gin.Engine, db *gorm.DB, firestore
 	router.POST("/assignedtaskNotify", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
 		AssignedTaskNotify(c, db, firestoreClient)
 	})
+	router.POST("/unassignedtaskNotify", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+		UnAssignedTaskNotify(c, db, firestoreClient)
+	})
 }
 
 func InviteBoardNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -293,6 +296,84 @@ func AssignedTaskNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 	// Send push notification
 	title := "งานที่ได้รับมอบหมาย"
 	body := fmt.Sprintf("คุณได้รับมอบหมายงาน: %s", task.TaskName)
+	datasend := map[string]string{
+		"payload": "notification",
+	}
+
+	err = sendPushNotification(app, fcmToken, title, body, datasend)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to send notification: " + err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"message": "Notification sent successfully",
+	})
+}
+
+func UnAssignedTaskNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	var req dto.UnAssignedNotify
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid input"})
+		return
+	}
+
+	// Query board information using req.BoardID
+	var task model.Tasks
+	if err := db.Where("board_id = ?", req.TaskID).First(&task).Error; err != nil {
+		c.JSON(404, gin.H{"error": "Board not found"})
+		return
+	}
+
+	// Get FCM token from Firestore
+	doc, err := firestoreClient.Collection("usersLogin").Doc(req.RecieveEmail).Get(context.Background())
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to get user token from Firestore: " + err.Error()})
+		return
+	}
+
+	// Check if document exists
+	if !doc.Exists() {
+		c.JSON(404, gin.H{"error": "User login data not found"})
+		return
+	}
+
+	// Extract FCM token
+	data := doc.Data()
+	fcmTokenInterface, exists := data["FMCToken"]
+	if !exists {
+		c.JSON(404, gin.H{"error": "FCM token not found for user"})
+		return
+	}
+
+	fcmToken, ok := fcmTokenInterface.(string)
+	if !ok || fcmToken == "" {
+		c.JSON(400, gin.H{"error": "Invalid or empty FCM token"})
+		return
+	}
+
+	// Load environment variables (consider moving this to initialization)
+	err = godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: No .env file found or failed to load")
+	}
+
+	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
+	if serviceAccountKeyPath == "" {
+		c.JSON(500, gin.H{"error": "Firebase credentials not configured"})
+		return
+	}
+
+	// Initialize Firebase app
+	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
+		return
+	}
+
+	// Send push notification
+	title := "ยกเลิกการมอบหมายงาน"
+	body := fmt.Sprintf("งานที่คุณได้รับ: '%s' ถูกยกเลิกแล้ว", task.TaskName)
 	datasend := map[string]string{
 		"payload": "notification",
 	}

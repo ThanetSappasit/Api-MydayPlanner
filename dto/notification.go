@@ -24,3 +24,9 @@ type AssignedNotify struct {
 	RecieveEmail string `json:"recieveemail" binding:"required"`
 	TaskID       string `json:"task_id" binding:"required"`
 }
+
+type UnAssignedNotify struct {
+	SendingEmail string `json:"sendingemail" binding:"required"`
+	RecieveEmail string `json:"recieveemail" binding:"required"`
+	TaskID       string `json:"task_id" binding:"required"`
+}

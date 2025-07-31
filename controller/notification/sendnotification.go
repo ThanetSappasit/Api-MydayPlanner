@@ -60,13 +60,59 @@ type NotificationBatch struct {
 	ShouldSend   bool
 }
 
+// NotificationResult สำหรับ return ผลลัพธ์
+type NotificationResult struct {
+	Message      string `json:"message"`
+	CurrentTime  string `json:"current_time"`
+	TotalCount   int    `json:"total_count"`
+	SuccessCount int    `json:"success_count"`
+	ErrorCount   int    `json:"error_count"`
+}
+
+// API Controller - เดิม
 func SendNotificationTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
 	router.POST("/send_notification", func(c *gin.Context) {
 		SendNotification(c, db, firestoreClient)
 	})
 }
 
+// API Handler - เรียกใช้ business logic
 func SendNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	result, err := ProcessNotifications(db, firestoreClient)
+	if err != nil {
+		log.Printf("API Error: %v", err)
+		c.JSON(500, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"message":       result.Message,
+		"current_time":  result.CurrentTime,
+		"total_count":   result.TotalCount,
+		"success_count": result.SuccessCount,
+		"error_count":   result.ErrorCount,
+	})
+}
+
+// Cron Job Function - ใหม่
+func SendNotificationJob(db *gorm.DB, firestoreClient *firestore.Client) {
+	log.Println("🔔 Starting notification cron job...")
+
+	result, err := ProcessNotifications(db, firestoreClient)
+	if err != nil {
+		log.Printf("❌ Notification job error: %v", err)
+		return
+	}
+
+	log.Printf("✅ Notification job completed - Success: %d, Error: %d, Total: %d",
+		result.SuccessCount, result.ErrorCount, result.TotalCount)
+}
+
+// Business Logic - แยกออกมาใช้ร่วมกัน
+func ProcessNotifications(db *gorm.DB, firestoreClient *firestore.Client) (*NotificationResult, error) {
+	// โหลด environment variables
 	if err := godotenv.Load(); err != nil {
 		fmt.Println("Warning: No .env file found or failed to load")
 	}
@@ -76,14 +122,12 @@ func SendNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 	// เริ่ม Firebase app
 	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
 	if serviceAccountKeyPath == "" {
-		c.JSON(500, gin.H{"error": "Firebase credentials not configured"})
-		return
+		return nil, fmt.Errorf("Firebase credentials not configured")
 	}
 
 	app, err := initializeFirebaseApp(serviceAccountKeyPath)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
-		return
+		return nil, fmt.Errorf("Failed to initialize Firebase app: %s", err.Error())
 	}
 
 	var notifications []model.Notification
@@ -96,8 +140,7 @@ func SendNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 	)
 
 	if err := query.Find(&notifications).Error; err != nil {
-		c.JSON(500, gin.H{"error": "Failed to fetch notifications"})
-		return
+		return nil, fmt.Errorf("Failed to fetch notifications: %v", err)
 	}
 
 	// สร้าง processor พร้อม cache
@@ -149,13 +192,13 @@ func SendNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 
 	wg.Wait()
 
-	c.JSON(200, gin.H{
-		"message":       "Notifications processed successfully",
-		"current_time":  now.Format(time.RFC3339),
-		"total_count":   len(notifications),
-		"success_count": successCount,
-		"error_count":   errorCount,
-	})
+	return &NotificationResult{
+		Message:      "Notifications processed successfully",
+		CurrentTime:  now.Format(time.RFC3339),
+		TotalCount:   len(notifications),
+		SuccessCount: successCount,
+		ErrorCount:   errorCount,
+	}, nil
 }
 
 // preloadData โหลดข้อมูลที่จำเป็นล่วงหน้าเพื่อลด database queries
