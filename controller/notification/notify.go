@@ -237,6 +237,7 @@ func AcceptInviteNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 }
 
 func AssignedTaskNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	// userID := c.MustGet("userId").(uint)
 	var req dto.AssignedNotify
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"error": "Invalid input"})
@@ -250,8 +251,14 @@ func AssignedTaskNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		return
 	}
 
+	recieveUSER, err := services.GetUserdata(db, req.RecieveID)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "User not found"})
+		return
+	}
+
 	// Get FCM token from Firestore
-	fcmToken, err := services.GetFMCTokenData(firestoreClient, req.RecieveEmail)
+	fcmToken, err := services.GetFMCTokenData(firestoreClient, recieveUSER.Email)
 	if err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
@@ -291,9 +298,19 @@ func UnAssignedTaskNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestor
 
 	// Query task information using req.TaskID
 	task, err := services.GetTaskData(db, req.TaskID)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "Task not found"})
+		return
+	}
+
+	recieveUSER, err := services.GetUserdata(db, req.RecieveID)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "User not found"})
+		return
+	}
 
 	// Get FCM token from Firestore
-	fcmToken, err := services.GetFMCTokenData(firestoreClient, req.RecieveEmail)
+	fcmToken, err := services.GetFMCTokenData(firestoreClient, recieveUSER.Email)
 	if err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
