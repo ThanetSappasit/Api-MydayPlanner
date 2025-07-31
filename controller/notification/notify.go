@@ -6,6 +6,7 @@ import (
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
+	"mydayplanner/services"
 	"os"
 
 	"cloud.google.com/go/firestore"
@@ -115,13 +116,14 @@ func AcceptInviteNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 	userId := c.MustGet("userId").(uint)
 	boardID := c.Param("boardid")
 
-	var user model.User
-	if err := db.Where("user_id = ?", userId).First(&user).Error; err != nil {
+	user, err := services.GetUserdata(db, fmt.Sprintf("%d", userId))
+	if err != nil {
 		c.JSON(404, gin.H{
 			"error": "User not found",
 		})
 		return
 	}
+
 	var board model.Board
 	if err := db.Where("board_id = ?", boardID).First(&board).Error; err != nil {
 		c.JSON(404, gin.H{
@@ -129,6 +131,7 @@ func AcceptInviteNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		})
 		return
 	}
+
 	// 1. ค้นหา UserID ทุกคนใน BoardUser จาก BoardID
 	var boardUsers []model.BoardUser
 	if err := db.Where("board_id = ?", boardID).Find(&boardUsers).Error; err != nil {
@@ -193,7 +196,7 @@ func AcceptInviteNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 
 	// 5. สร้าง Firebase App (สมมติว่ามี app instance อยู่แล้ว)
 	// Load environment variables (consider moving this to initialization)
-	err := godotenv.Load()
+	err = godotenv.Load()
 	if err != nil {
 		fmt.Println("Warning: No .env file found or failed to load")
 	}
@@ -240,54 +243,22 @@ func AssignedTaskNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 		return
 	}
 
-	// Query board information using req.BoardID
-	var task model.Tasks
-	if err := db.Where("board_id = ?", req.TaskID).First(&task).Error; err != nil {
-		c.JSON(404, gin.H{"error": "Board not found"})
+	// Query task information using req.TaskID
+	task, err := services.GetTaskData(db, req.TaskID)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "Task not found"})
 		return
 	}
 
 	// Get FCM token from Firestore
-	doc, err := firestoreClient.Collection("usersLogin").Doc(req.RecieveEmail).Get(context.Background())
+	fcmToken, err := services.GetFMCTokenData(firestoreClient, req.RecieveEmail)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to get user token from Firestore: " + err.Error()})
+		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Check if document exists
-	if !doc.Exists() {
-		c.JSON(404, gin.H{"error": "User login data not found"})
-		return
-	}
-
-	// Extract FCM token
-	data := doc.Data()
-	fcmTokenInterface, exists := data["FMCToken"]
-	if !exists {
-		c.JSON(404, gin.H{"error": "FCM token not found for user"})
-		return
-	}
-
-	fcmToken, ok := fcmTokenInterface.(string)
-	if !ok || fcmToken == "" {
-		c.JSON(400, gin.H{"error": "Invalid or empty FCM token"})
-		return
-	}
-
-	// Load environment variables (consider moving this to initialization)
-	err = godotenv.Load()
-	if err != nil {
-		fmt.Println("Warning: No .env file found or failed to load")
-	}
-
-	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
-	if serviceAccountKeyPath == "" {
-		c.JSON(500, gin.H{"error": "Firebase credentials not configured"})
-		return
-	}
-
-	// Initialize Firebase app
-	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	// สร้าง Firebase app
+	app, err := services.GetFirebaseApp()
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
 		return
@@ -318,54 +289,18 @@ func UnAssignedTaskNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestor
 		return
 	}
 
-	// Query board information using req.BoardID
-	var task model.Tasks
-	if err := db.Where("board_id = ?", req.TaskID).First(&task).Error; err != nil {
-		c.JSON(404, gin.H{"error": "Board not found"})
-		return
-	}
+	// Query task information using req.TaskID
+	task, err := services.GetTaskData(db, req.TaskID)
 
 	// Get FCM token from Firestore
-	doc, err := firestoreClient.Collection("usersLogin").Doc(req.RecieveEmail).Get(context.Background())
+	fcmToken, err := services.GetFMCTokenData(firestoreClient, req.RecieveEmail)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to get user token from Firestore: " + err.Error()})
-		return
-	}
-
-	// Check if document exists
-	if !doc.Exists() {
-		c.JSON(404, gin.H{"error": "User login data not found"})
-		return
-	}
-
-	// Extract FCM token
-	data := doc.Data()
-	fcmTokenInterface, exists := data["FMCToken"]
-	if !exists {
-		c.JSON(404, gin.H{"error": "FCM token not found for user"})
-		return
-	}
-
-	fcmToken, ok := fcmTokenInterface.(string)
-	if !ok || fcmToken == "" {
-		c.JSON(400, gin.H{"error": "Invalid or empty FCM token"})
-		return
-	}
-
-	// Load environment variables (consider moving this to initialization)
-	err = godotenv.Load()
-	if err != nil {
-		fmt.Println("Warning: No .env file found or failed to load")
-	}
-
-	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
-	if serviceAccountKeyPath == "" {
-		c.JSON(500, gin.H{"error": "Firebase credentials not configured"})
+		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
 	// Initialize Firebase app
-	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	app, err := services.GetFirebaseApp()
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
 		return

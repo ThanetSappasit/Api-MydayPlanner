@@ -4,6 +4,7 @@ import (
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
+	"mydayplanner/services"
 	"net/http"
 	"time"
 
@@ -35,10 +36,11 @@ func DisableUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 		return
 	}
 	// ค้นหาผู้ใช้ในฐานข้อมูลโดยใช้ email
-	var user model.User
-	result := db.First(&user, userId)
-	if result.Error != nil {
-		c.JSON(500, gin.H{"error": "Database error"})
+	user, err := services.GetUserdata(db, userId)
+	if err != nil {
+		c.JSON(404, gin.H{
+			"error": "User not found",
+		})
 		return
 	}
 
@@ -55,10 +57,14 @@ func DisableUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client)
 	}
 
 	// อัปเดตเฉพาะฟิลด์ active ใน Firestore
-	_, err := firestoreClient.Collection("usersLogin").Doc(user.Email).Update(c, []firestore.Update{
+	_, err = firestoreClient.Collection("usersLogin").Doc(user.Email).Update(c, []firestore.Update{
 		{
 			Path:  "active",
 			Value: newStatus,
+		},
+		{
+			Path:  "updatedAt",
+			Value: time.Now(),
 		},
 	})
 
