@@ -147,9 +147,6 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		return
 	}
 
-	// เพิ่ม updated_at ทุกครั้งที่มีการอัปเดท
-	updates["updated_at"] = time.Now()
-
 	// สำหรับ Firestore rollback
 	var firestoreDocRef *firestore.DocumentRef
 	var firestoreOriginalData map[string]interface{}
@@ -167,6 +164,11 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 				Value: value,
 			})
 		}
+
+		firestoreUpdates = append(firestoreUpdates, firestore.Update{
+			Path:  "updatedAt",
+			Value: time.Now().Format(time.RFC3339),
+		})
 
 		if len(firestoreUpdates) > 0 {
 			firestoreDocRef = firestoreClient.Collection("Boards").Doc(fmt.Sprintf("%d", *task.BoardID)).
