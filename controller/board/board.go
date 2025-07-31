@@ -518,7 +518,7 @@ func NewBoardToken(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 	data := map[string]interface{}{
 		"ShareToken":     encodedParams,
 		"ShareExpiresAt": expireAt,
-		"update_at":      time.Now(),
+		"updatedAt":      time.Now(),
 	}
 	if err := saveTaskToFirestore(ctx, firestoreClient, boardIDInt, data); err != nil {
 		fmt.Printf("Warning: Failed to save token to Firestore: %v\n", err)
@@ -617,7 +617,7 @@ func Addboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		"Name":      user.Name,
 		"Profile":   user.Profile,
 		"AddedAt":   time.Now(),
-		"update_at": time.Now(),
+		"updatedAt": time.Now(),
 	}
 
 	if _, err := boardDocRef.Set(ctx, boardUserData); err != nil {

@@ -12,3 +12,15 @@ type UpdateNotificationRequest struct {
 	RecurringPattern *string `json:"recurring_pattern"`
 	IsSend           *bool   `json:"is_send"`
 }
+
+type InviteNotify struct {
+	RecieveEmail string `json:"recieveemail" binding:"required"`
+	SendingEmail string `json:"sendingemail" binding:"required"`
+	BoardID      string `json:"board_id" binding:"required"`
+}
+
+type AssignedNotify struct {
+	SendingEmail string `json:"sendingemail" binding:"required"`
+	RecieveEmail string `json:"recieveemail" binding:"required"`
+	TaskID       string `json:"task_id" binding:"required"`
+}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
@@ -145,6 +146,9 @@ func AdjustTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No valid fields to update"})
 		return
 	}
+
+	// เพิ่ม updated_at ทุกครั้งที่มีการอัปเดท
+	updates["updated_at"] = time.Now()
 
 	// สำหรับ Firestore rollback
 	var firestoreDocRef *firestore.DocumentRef

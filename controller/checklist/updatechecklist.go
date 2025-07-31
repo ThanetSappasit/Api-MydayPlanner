@@ -172,7 +172,7 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 				Path:  "checklist_name",
 				Value: checklistName,
 			}, {
-				Path:  "update_at",
+				Path:  "updatedAt",
 				Value: firestore.ServerTimestamp,
 			},
 		}
