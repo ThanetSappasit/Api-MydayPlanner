@@ -26,5 +26,5 @@ type AssignedNotify struct {
 
 type UnAssignedNotify struct {
 	RecieveID string `json:"recieveID" binding:"required"`
-	TaskID    string `json:"task_id" binding:"required"`
+	AssignID  string `json:"assign_id" binding:"required"`
 }

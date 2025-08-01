@@ -8,6 +8,7 @@ import (
 	"mydayplanner/model"
 	"mydayplanner/services"
 	"os"
+	"strconv"
 
 	"cloud.google.com/go/firestore"
 	firebase "firebase.google.com/go/v4"
@@ -296,8 +297,13 @@ func UnAssignedTaskNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestor
 		return
 	}
 
+	var assign model.Assigned
+	if err := db.Where("ass_id = ?", req.AssignID).First(&assign).Error; err != nil {
+		c.JSON(404, gin.H{"error": "Assignment not found"})
+		return
+	}
 	// Query task information using req.TaskID
-	task, err := services.GetTaskData(db, req.TaskID)
+	task, err := services.GetTaskData(db, strconv.Itoa(assign.TaskID))
 	if err != nil {
 		c.JSON(404, gin.H{"error": "Task not found"})
 		return
