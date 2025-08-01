@@ -155,6 +155,10 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		}
 		updates["beforedue_date"] = parsedBeforeDate
 		notification.BeforeDueDate = &parsedBeforeDate
+	} else {
+		// If BeforeDueDate is not provided, set it to nil
+		updates["beforedue_date"] = nil
+		notification.BeforeDueDate = nil
 	}
 
 	// Update recurring pattern if provided
