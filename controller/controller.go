@@ -36,6 +36,12 @@ func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.
 	}
 }
 
+func GetemailCTL(router *gin.Engine, db *gorm.DB) {
+	router.POST("/email", func(c *gin.Context) {
+		user.GetEmail(c, db)
+	})
+}
+
 func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
 
 }

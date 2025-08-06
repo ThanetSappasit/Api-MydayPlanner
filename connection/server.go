@@ -71,6 +71,7 @@ func StartServer() {
 	shareboard.ShareboardController(router, DB, FB)
 
 	controller.UserController(router, DB, FB)
+	controller.GetemailCTL(router, DB)
 
 	router.Run()
 }

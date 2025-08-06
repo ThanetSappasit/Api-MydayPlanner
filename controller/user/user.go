@@ -379,3 +379,35 @@ func SearchUser(c *gin.Context, db *gorm.DB) {
 
 	c.JSON(http.StatusOK, userResponses)
 }
+
+func GetEmail(c *gin.Context, db *gorm.DB) {
+	var emailReq dto.EmailRequest
+	if err := c.ShouldBindJSON(&emailReq); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+		return
+	}
+
+	// Query ข้อมูลจากฐานข้อมูล
+	var user model.User
+	result := db.Where("email = ?", emailReq.Email).First(&user)
+
+	// ตรวจสอบว่าพบข้อมูลหรือไม่
+	if result.Error != nil {
+		if result.Error == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			return
+		}
+		// Error อื่นๆ จากฐานข้อมูล
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	// สร้าง response
+	response := gin.H{
+		"Email":  user.Email,
+		"UserID": user.UserID,
+	}
+
+	// ส่ง response กลับ
+	c.JSON(http.StatusOK, response)
+}
