@@ -10,7 +10,7 @@ import (
 )
 
 func StartScheduler() {
-	c := cron.New(cron.WithSeconds()) // รองรับ seconds ด้วย
+	c := cron.New(cron.WithSeconds()) // เปิดใช้ seconds
 
 	// เชื่อมต่อ database
 	DB, err := connection.DBConnection()
@@ -23,14 +23,20 @@ func StartScheduler() {
 		log.Fatalf("Failed to initialize Firestore client: %v", err)
 	}
 
-	// กำหนด cron job - ทุกนาที
-	_, err = c.AddFunc("0 * * * * *", func() {
+	// Job ที่รันทุกนาที (ใช้ seconds format: "0 * * * * *")
+	if _, err = c.AddFunc("0 * * * * *", func() {
 		log.Println("Running scheduled notification job...")
 		notification.SendNotificationJob(DB, FB)
-	})
+	}); err != nil {
+		log.Fatalf("Failed to add SendNotificationJob cron: %v", err)
+	}
 
-	if err != nil {
-		log.Fatalf("Failed to add cron job: %v", err)
+	// Job ที่รันทุกชั่วโมง (ใช้ minutes format: "0 * * * *")
+	if _, err := c.AddFunc("0 0 0 * * *", func() {
+		log.Println("Running midnight daily task...")
+		notification.RepeatNotificationJob(DB, FB)
+	}); err != nil {
+		log.Fatalf("Failed to add RepeatNotificationJob cron: %v", err)
 	}
 
 	c.Start()
