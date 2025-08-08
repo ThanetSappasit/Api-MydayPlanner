@@ -442,6 +442,22 @@ func GoogleSignIn(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 	} else {
 		// กรณีพบผู้ใช้ในระบบ
 		userID = uint(user.UserID)
+		if user.IsVerify == "0" {
+			if err := tx.Model(&model.User{}).
+				Where("user_id = ?", user.UserID).
+				Update("is_verify", isVerify).Error; err != nil {
+
+				tx.Rollback()
+				log.Printf("Failed to update is_verify: %v", err)
+
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"message": "เกิดข้อผิดพลาดในการอัปเดตสถานะยืนยันบัญชี",
+				})
+				return
+			}
+
+		}
 
 		// ตรวจสอบสถานะบัญชี
 		switch user.IsActive {
