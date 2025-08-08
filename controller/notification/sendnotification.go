@@ -581,7 +581,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				return fmt.Errorf("failed to find board users: %v", err)
 			}
 
-			updateData["notiCount"] = false
 			updateData["isNotiRemind"] = true
 			updateData["isNotiRemindShow"] = true
 			updateData["dueDateOld"] = firestore.Delete
@@ -594,6 +593,7 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				userNotifications[userIDStr] = map[string]interface{}{
 					"isShow":           false,
 					"isNotiRemindShow": true,
+					"notiCount":        false,
 				}
 			}
 			updateData["userNotifications"] = userNotifications
@@ -614,7 +614,7 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 					return fmt.Errorf("failed to find board users: %v", err)
 				}
 				updateData["isShow"] = true
-				updateData["notiCount"] = false
+				// updateData["notiCount"] = false
 				updateData["updatedAt"] = time.Now().UTC()
 
 				updateData["dueDateOld"] = firestore.Delete
@@ -623,7 +623,8 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				for _, boardUser := range boardUsers {
 					userIDStr := fmt.Sprintf("%d", boardUser.UserID)
 					userNotifications[userIDStr] = map[string]interface{}{
-						"isShow": true,
+						"isShow":    true,
+						"notiCount": false,
 					}
 				}
 				updateData["userNotifications"] = userNotifications
@@ -650,7 +651,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				updateData["remindMeBeforeOld"] = notification.BeforeDueDate
 				updateData["isShow"] = false
 				updateData["isNotiRemind"] = false
-				updateData["notiCount"] = false
 
 				if notification.BeforeDueDate != nil {
 					nextRemindMeBefore := notification.BeforeDueDate.AddDate(0, 0, 1)
@@ -663,6 +663,7 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				for _, boardUser := range boardUsers {
 					userIDStr := fmt.Sprintf("%d", boardUser.UserID)
 					userNotifications[userIDStr] = map[string]interface{}{
+						"notiCount":         false,
 						"isShow":            true,
 						"isNotiRemindShow":  true,
 						"dueDateOld":        notification.DueDate,
@@ -680,7 +681,7 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 		docPath = fmt.Sprintf("Notifications/%s/Tasks/%d", email, notification.NotificationID)
 
 		if newStatus == "1" {
-			updateData["notiCount"] = false
+
 			updateData["isNotiRemind"] = true
 			updateData["isNotiRemindShow"] = true
 			updateData["updatedAt"] = time.Now().UTC()
@@ -690,7 +691,7 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 		} else if newStatus == "2" {
 			if notification.RecurringPattern == "onetime" {
 				updateData["isShow"] = true
-				updateData["notiCount"] = false
+
 				updateData["updatedAt"] = time.Now().UTC()
 
 				updateData["dueDateOld"] = firestore.Delete
@@ -704,7 +705,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				updateData["remindMeBeforeOld"] = notification.BeforeDueDate
 				updateData["isShow"] = false
 				updateData["isNotiRemind"] = false
-				updateData["notiCount"] = false
 
 				if notification.BeforeDueDate != nil {
 					nextRemindMeBefore := notification.BeforeDueDate.AddDate(0, 0, 1)
