@@ -581,6 +581,7 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				return fmt.Errorf("failed to find board users: %v", err)
 			}
 
+			// updateData["notiCount"] = false
 			updateData["isNotiRemind"] = true
 			updateData["isNotiRemindShow"] = true
 			updateData["dueDateOld"] = firestore.Delete
