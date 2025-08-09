@@ -3,7 +3,6 @@ package board
 import (
 	"context"
 	"fmt"
-	"log"
 	"mydayplanner/dto"
 	"mydayplanner/middleware"
 	"mydayplanner/model"
@@ -13,9 +12,6 @@ import (
 
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
-	"google.golang.org/api/iterator"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"gorm.io/gorm"
 )
 
@@ -23,317 +19,306 @@ func DeleteBoardController(router *gin.Engine, db *gorm.DB, firestoreClient *fir
 	router.DELETE("/board", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
 		DeleteBoard(c, db, firestoreClient)
 	})
+
 }
 
-// DeleteResult represents the result of a board deletion operation
-type DeleteResult struct {
-	Status string // "success", "unauthorized", "not_found", "error"
-	Error  string
+type ErrorResponse struct {
+	Error   string            `json:"error"`
+	Details map[string]string `json:"details,omitempty"`
 }
 
 func DeleteBoard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-	// Get user ID from token and board ID from request body
 	userID := c.MustGet("userId").(uint)
-	var dataID dto.DeleteBoardRequest
-	if err := c.ShouldBindJSON(&dataID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+	var boardIDreq dto.DeleteBoardRequest
+	if err := c.ShouldBindJSON(&boardIDreq); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Error:   "Invalid request body",
+			Details: map[string]string{"validation": err.Error()},
+		})
 		return
 	}
 
-	var user struct {
-		UserID int
-		Email  string
-	}
-	if err := db.Raw("SELECT user_id, email FROM user WHERE user_id = ?", userID).Scan(&user).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
-		return
-	}
+	var groupBoardIDs []int   // Board IDs ที่มีใน BoardUser (Group Board)
+	var privateBoardIDs []int // Board IDs ที่ไม่มีใน BoardUser (Private Board)
 
-	var errors []string
-	var deletedBoards []string
-	var unauthorizedBoards []string
-	var notFoundBoards []string
-
-	// สร้าง context สำหรับ Firestore operations
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
-	defer cancel()
-
-	// Delete each board
-	for _, boardIDStr := range dataID.BoardID {
+	// วนลูปตรวจสอบแต่ละ Board ID
+	for _, boardIDStr := range boardIDreq.BoardID {
+		// แปลง string เป็น int
 		boardID, err := strconv.Atoi(boardIDStr)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("Invalid board ID format: %s", boardIDStr))
-			continue
+			c.JSON(http.StatusBadRequest, ErrorResponse{
+				Error:   "Invalid board ID format",
+				Details: map[string]string{"board_id": boardIDStr},
+			})
+			return
 		}
 
-		// ตรวจสอบสิทธิ์และลบ board
-		deleteResult := deleteBoardWithPermissionCheck(db, firestoreClient, ctx, user.UserID, boardID)
-
-		switch deleteResult.Status {
-		case "success":
-			deletedBoards = append(deletedBoards, boardIDStr)
-		case "unauthorized":
-			unauthorizedBoards = append(unauthorizedBoards, boardIDStr)
-		case "not_found":
-			notFoundBoards = append(notFoundBoards, boardIDStr)
-		case "error":
-			errors = append(errors, fmt.Sprintf("Board %s: %s", boardIDStr, deleteResult.Error))
+		// ตรวจสอบว่า Board ID นี้มีใน BoardUser หรือไม่
+		var count int64
+		if err := db.Model(&model.BoardUser{}).Where("board_id = ?", boardID).Count(&count).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, ErrorResponse{
+				Error:   "Database error",
+				Details: map[string]string{"error": err.Error()},
+			})
+			return
 		}
-	}
 
-	// สร้าง response
-	response := gin.H{}
-
-	if len(deletedBoards) > 0 {
-		response["deleted_boards"] = deletedBoards
-	}
-
-	if len(unauthorizedBoards) > 0 {
-		response["unauthorized_boards"] = unauthorizedBoards
-		response["unauthorized_message"] = "You don't have permission to delete these boards"
-	}
-
-	if len(notFoundBoards) > 0 {
-		response["not_found_boards"] = notFoundBoards
-		response["not_found_message"] = "These boards were not found"
-	}
-
-	if len(errors) > 0 {
-		response["errors"] = errors
-	}
-
-	// กำหนด HTTP status และ message
-	if len(deletedBoards) == len(dataID.BoardID) {
-		// ลบสำเร็จทั้งหมด
-		response["message"] = "All boards deleted successfully"
-		c.JSON(http.StatusOK, response)
-	} else if len(deletedBoards) > 0 {
-		// ลบสำเร็จบางส่วน
-		response["message"] = "Some boards were deleted successfully"
-		c.JSON(http.StatusPartialContent, response)
-	} else {
-		// ลบไม่สำเร็จเลย
-		if len(unauthorizedBoards) > 0 {
-			response["message"] = "No boards were deleted due to permission issues"
-			c.JSON(http.StatusForbidden, response)
-		} else if len(notFoundBoards) > 0 {
-			response["message"] = "No boards were deleted - boards not found"
-			c.JSON(http.StatusNotFound, response)
+		// แยกประเภท Board ตามผลการตรวจสอบ
+		if count > 0 {
+			// มีข้อมูลใน BoardUser = Group Board
+			groupBoardIDs = append(groupBoardIDs, boardID)
 		} else {
-			response["message"] = "No boards were deleted due to errors"
-			c.JSON(http.StatusInternalServerError, response)
+			// ไม่มีข้อมูลใน BoardUser = Private Board
+			privateBoardIDs = append(privateBoardIDs, boardID)
 		}
 	}
+
+	// เรียกใช้ฟังก์ชันตามประเภท Board
+	if len(groupBoardIDs) > 0 {
+		if err := deleteGroupBoard(db, firestoreClient, groupBoardIDs); err != nil {
+			c.JSON(http.StatusInternalServerError, ErrorResponse{
+				Error:   "Failed to delete group boards",
+				Details: map[string]string{"error": err.Error()},
+			})
+			return
+		}
+	}
+
+	if len(privateBoardIDs) > 0 {
+		if err := deletePrivateBoard(db, firestoreClient, privateBoardIDs, userID); err != nil {
+			c.JSON(http.StatusInternalServerError, ErrorResponse{
+				Error:   "Failed to delete private boards",
+				Details: map[string]string{"error": err.Error()},
+			})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":                "Boards deleted successfully",
+		"deleted_group_boards":   len(groupBoardIDs),
+		"deleted_private_boards": len(privateBoardIDs),
+	})
 }
 
-// deleteBoardWithPermissionCheck ตรวจสอบสิทธิ์และลบ board
-func deleteBoardWithPermissionCheck(db *gorm.DB, firestoreClient *firestore.Client, ctx context.Context, userID int, boardID int) DeleteResult {
-	// 1. ตรวจสอบว่า board มีอยู่และ user เป็นเจ้าของหรือไม่
-	var board model.Board
-	if err := db.Where("board_id = ?", boardID).First(&board).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return DeleteResult{Status: "not_found", Error: "Board not found"}
-		}
-		return DeleteResult{Status: "error", Error: fmt.Sprintf("Database error: %v", err)}
-	}
-
-	// 2. ตรวจสอบสิทธิ์ - เฉพาะเจ้าของเท่านั้นที่ลบได้
-	if board.CreatedBy != userID {
-		return DeleteResult{Status: "unauthorized", Error: "You are not the owner of this board"}
-	}
-
-	// 3. ดึงข้อมูลที่จำเป็นสำหรับ Firestore ก่อนลบ SQL
-	var boardUsers []model.BoardUser
-	if err := db.Where("board_id = ?", boardID).Find(&boardUsers).Error; err != nil {
-		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to get board users: %v", err)}
-	}
-
-	var taskIDs []int
-	if err := db.Raw("SELECT task_id FROM tasks WHERE board_id = ?", boardID).Scan(&taskIDs).Error; err != nil {
-		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to get tasks: %v", err)}
-	}
-
-	var notifications []struct {
-		NotificationID int
-		TaskID         int
-	}
-
-	if len(taskIDs) > 0 {
-		// ตรวจสอบว่าตาราง notifications มีอยู่หรือไม่
-		var tableExists bool
-		err := db.Raw("SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'notifications'").Scan(&tableExists).Error
-
-		if err != nil {
-			return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to check notifications table existence: %v", err)}
-		}
-
-		// ถ้าตารางมีอยู่ ให้ดึงข้อมูล notifications
-		if tableExists {
-			if err := db.Raw(`
-				SELECT notification_id, task_id
-				FROM notifications
-				WHERE task_id IN ?
-			`, taskIDs).Scan(&notifications).Error; err != nil {
-				return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to get notifications: %v", err)}
-			}
-		} else {
-			// ถ้าตารางไม่มี ให้ log warning และใช้ slice ว่าง
-			log.Printf("Warning: notifications table does not exist, skipping notification deletion for board %d", boardID)
-			notifications = []struct {
-				NotificationID int
-				TaskID         int
-			}{}
-		}
-	}
-
-	var userEmail string
-	if err := db.Raw("SELECT email FROM user WHERE user_id = ?", userID).Scan(&userEmail).Error; err != nil {
-		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to get user email: %v", err)}
-	}
-
-	isGroupBoard := len(boardUsers) > 0
-
-	// 4. ลบจาก Firestore ก่อน (ขณะที่ข้อมูลใน SQL ยังคงอยู่)
-	if err := deleteFromFirestore(firestoreClient, ctx, boardID, userID, userEmail, isGroupBoard, boardUsers, taskIDs, notifications); err != nil {
-		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to delete from Firestore: %v", err)}
-	}
-
-	// 5. เริ่ม transaction เพื่อลบข้อมูลใน SQL
+func deleteGroupBoard(db *gorm.DB, firestoreClient *firestore.Client, boardIDs []int) error {
 	tx := db.Begin()
-	if tx.Error != nil {
-		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to start transaction: %v", tx.Error)}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+	for _, boardID := range boardIDs {
+		// Delete task กับ subtask
+		tasks, err := queryTaskByBoardID(db, boardID)
+		if err != nil {
+			return err
+		}
+		for _, task := range tasks {
+			if err := deleteSubCollectionByTaskID(db, firestoreClient, task.TaskID); err != nil {
+				return err
+			}
+		}
+		// ลบ boarduser
+		if err := deleteMainPathByBoardID(db, firestoreClient, boardID); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to delete main path for board %d: %w", boardID, err)
+		}
+
+		// ลบ board ออกจาก sql
+		if err := tx.Where("board_id = ?", boardID).Delete(&model.Board{}).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to delete board %d: %w", boardID, err)
+		}
+
+		if err := tx.Commit().Error; err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
 	}
+	return nil
+}
+
+func deletePrivateBoard(db *gorm.DB, firestoreClient *firestore.Client, boardIDs []int, userid uint) error {
+	var user model.User
+	if err := db.First(&user, userid).Error; err != nil {
+		return err
+	}
+	email := user.Email
+	tx := db.Begin()
 	defer func() {
 		if r := recover(); r != nil {
 			tx.Rollback()
 		}
 	}()
 
-	// 6. ลบ board หลัก (CASCADE จะลบ related records อัตโนมัติ)
-	if err := tx.Delete(&board).Error; err != nil {
-		tx.Rollback()
-		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to delete board: %v", err)}
-	}
-
-	// 7. Commit transaction
-	if err := tx.Commit().Error; err != nil {
-		tx.Rollback()
-		return DeleteResult{Status: "error", Error: fmt.Sprintf("Failed to commit transaction: %v", err)}
-	}
-
-	return DeleteResult{Status: "success", Error: ""}
-}
-
-// deleteFromFirestore ลบข้อมูลจาก Firestore
-func deleteFromFirestore(
-	firestoreClient *firestore.Client,
-	ctx context.Context,
-	boardID int,
-	userID int,
-	userEmail string,
-	isGroup bool,
-	boardUsers []model.BoardUser,
-	taskIDs []int,
-	notifications []struct {
-		NotificationID int
-		TaskID         int
-	},
-) error {
-	boardDoc := firestoreClient.Collection("Boards").Doc(strconv.Itoa(boardID))
-
-	docSnapshot, err := boardDoc.Get(ctx)
-	if err != nil {
-		if status.Code(err) == codes.NotFound {
-			fmt.Printf("Board %d not found in Firestore (already deleted or never existed)\n", boardID)
-			return nil
+	for _, boardID := range boardIDs {
+		// Delete tasks associated with the board
+		tasks, err := queryTaskByBoardID(db, boardID)
+		if err != nil {
+			return err
 		}
-		return fmt.Errorf("failed to check board existence in Firestore: %v", err)
-	}
-
-	if !docSnapshot.Exists() {
-		fmt.Printf("Board %d document does not exist in Firestore\n", boardID)
-		return nil
-	}
-
-	batch := firestoreClient.Batch()
-
-	// ดึงเฉพาะ BoardUserID ออกมาเป็น []int
-	var boarduserIDs []int
-	for _, bu := range boardUsers {
-		boarduserIDs = append(boarduserIDs, bu.BoardUserID)
-	}
-
-	log.Printf("📋 Found %d board_user_ids for board %d: %v\n", len(boarduserIDs), boardID, boarduserIDs)
-
-	// ===== ลบ BoardUser =====
-	for _, boardusersid := range boarduserIDs {
-		boarduserDoc := boardDoc.Collection("BoardUsers").Doc(strconv.Itoa(boardusersid))
-		batch.Delete(boarduserDoc)
-	}
-
-	fmt.Printf("Found %d tasks for board %d\n", len(taskIDs), boardID)
-
-	// ===== ลบ Tasks ใน Firestore: /Boards/{boardID}/Tasks/{taskID} =====
-	for _, taskID := range taskIDs {
-		taskDoc := boardDoc.Collection("Tasks").Doc(strconv.Itoa(taskID))
-		batch.Delete(taskDoc)
-	}
-
-	// ===== ลบ Notifications ตามโครงสร้างใหม่ =====
-	if isGroup {
-		for _, n := range notifications {
-			notiDoc := firestoreClient.
-				Collection("BoardTasks").
-				Doc(strconv.Itoa(n.TaskID)).
-				Collection("Notifications").
-				Doc(strconv.Itoa(n.NotificationID))
-			batch.Delete(notiDoc)
-		}
-	} else {
-		for _, n := range notifications {
-			notiDoc := firestoreClient.
-				Collection("Notifications").
-				Doc(userEmail).
-				Collection("Tasks").
-				Doc(strconv.Itoa(n.NotificationID))
-			batch.Delete(notiDoc)
-		}
-	}
-
-	// ===== ลบ Subcollections อื่น ๆ ที่อยู่ใต้ /BoardTasks/{taskID} =====
-	subCollections := []string{"Assigned", "Attachments", "Checklist"}
-
-	for _, taskID := range taskIDs {
-		for _, sub := range subCollections {
-			iter := firestoreClient.
-				Collection("BoardTasks").
-				Doc(strconv.Itoa(taskID)).
-				Collection(sub).
-				Documents(ctx)
-
-			for {
-				doc, err := iter.Next()
-				if err == iterator.Done {
-					break
-				}
-				if err != nil {
-					log.Printf("Error reading subcollection '%s' for task %d: %v", sub, taskID, err)
-					break
-				}
-				batch.Delete(doc.Ref)
+		for _, task := range tasks {
+			if err := deleteNotificationsByTaskID(db, firestoreClient, task.TaskID, email); err != nil {
+				return err
 			}
 		}
+		if err := tx.Where("board_id = ? AND create_by = ?", boardID, userid).Delete(&model.Board{}).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to delete board %d: %w", boardID, err)
+		}
+
+		if err := tx.Commit().Error; err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+	}
+	return nil
+}
+
+func queryTaskByBoardID(db *gorm.DB, boardID int) ([]model.Tasks, error) {
+	var tasks []model.Tasks
+	if err := db.Where("board_id = ?", boardID).Find(&tasks).Error; err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func deleteNotificationsByTaskID(db *gorm.DB, fb *firestore.Client, taskID int, email string) error {
+	var notifications []model.Notification
+	if err := db.Where("task_id = ?", taskID).Find(&notifications).Error; err != nil {
+		return fmt.Errorf("failed to find notifications: %w", err)
 	}
 
-	// ===== ลบ document หลักของ board =====
-	batch.Delete(boardDoc)
+	if len(notifications) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// ===== Commit การลบทั้งหมด =====
-	_, err = batch.Commit(ctx)
+	tx := db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+	batch := fb.Batch()
+
+	// Add all deletions to batch
+	for _, notification := range notifications {
+		notificationIDStr := strconv.Itoa(notification.NotificationID)
+		firestorePath := fmt.Sprintf("Notifications/%s/Tasks/%s", email, notificationIDStr)
+		docRef := fb.Doc(firestorePath)
+		batch.Delete(docRef)
+	}
+
+	// Execute Firestore batch operation
+	if _, err := batch.Commit(ctx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to delete notifications from Firestore: %w", err)
+	}
+
+	// Commit database transaction
+	if err := tx.Commit().Error; err != nil {
+		return fmt.Errorf("failed to commit database transaction: %w", err)
+	}
+
+	return nil
+}
+
+func deleteSubCollectionByTaskID(db *gorm.DB, fb *firestore.Client, taskID int) error {
+	ctx := context.Background()
+
+	// Delete Notifications
+	var notifications []model.Notification
+	if err := db.Where("task_id = ?", taskID).Find(&notifications).Error; err != nil {
+		return fmt.Errorf("failed to find notifications: %w", err)
+	}
+	for _, notification := range notifications {
+		docPath := fmt.Sprintf("BoardTasks/%d/Notifications/%d", taskID, notification.NotificationID) // หรือ notification.NotificationID ขึ้นอยู่กับ field name
+		if _, err := fb.Doc(docPath).Delete(ctx); err != nil {
+			return fmt.Errorf("failed to delete notification from Firestore: %w", err)
+		}
+	}
+
+	// Delete Assigned
+	var assigned []model.Assigned
+	if err := db.Where("task_id = ?", taskID).Find(&assigned).Error; err != nil {
+		return fmt.Errorf("failed to find assigned: %w", err)
+	}
+	for _, ass := range assigned {
+		docPath := fmt.Sprintf("BoardTasks/%d/Assigned/%d", taskID, ass.AssID) // หรือ ass.AssID
+		if _, err := fb.Doc(docPath).Delete(ctx); err != nil {
+			return fmt.Errorf("failed to delete assigned from Firestore: %w", err)
+		}
+	}
+
+	// Delete Attachments
+	var attachments []model.Attachment
+	if err := db.Where("tasks_id = ?", taskID).Find(&attachments).Error; err != nil {
+		return fmt.Errorf("failed to find attachments: %w", err)
+	}
+	for _, attachment := range attachments {
+		docPath := fmt.Sprintf("BoardTasks/%d/Attachments/%d", taskID, attachment.AttachmentID) // หรือ attachment.AttachmentID
+		if _, err := fb.Doc(docPath).Delete(ctx); err != nil {
+			return fmt.Errorf("failed to delete attachment from Firestore: %w", err)
+		}
+	}
+
+	// Delete Checklist
+	var checklists []model.Checklist
+	if err := db.Where("task_id = ?", taskID).Find(&checklists).Error; err != nil {
+		return fmt.Errorf("failed to find checklists: %w", err)
+	}
+	for _, checklist := range checklists {
+		docPath := fmt.Sprintf("BoardTasks/%d/Checklist/%d", taskID, checklist.ChecklistID) // หรือ checklist.ChecklistID
+		if _, err := fb.Doc(docPath).Delete(ctx); err != nil {
+			return fmt.Errorf("failed to delete checklist from Firestore: %w", err)
+		}
+	}
+
+	docPath := fmt.Sprintf("BoardTasks/%d", taskID)
+	if _, err := fb.Doc(docPath).Delete(ctx); err != nil {
+		return fmt.Errorf("failed to delete boardtask from Firestore: %w", err)
+	}
+
+	return nil
+}
+
+func queryBoarduserByBoardID(db *gorm.DB, boardID int) ([]model.BoardUser, error) {
+	var boardUsers []model.BoardUser
+	if err := db.Where("board_id = ?", boardID).Find(&boardUsers).Error; err != nil {
+		return nil, fmt.Errorf("failed to query board users: %w", err)
+	}
+	return boardUsers, nil
+}
+
+func deleteMainPathByBoardID(db *gorm.DB, fb *firestore.Client, boardID int) error {
+	ctx := context.Background()
+	// หาBoarduser
+	boardUsers, err := queryBoarduserByBoardID(db, boardID)
 	if err != nil {
-		return fmt.Errorf("failed to commit Firestore batch deletion: %v", err)
+		return fmt.Errorf("failed to get board users for board %d: %w", boardID, err)
 	}
-
-	fmt.Printf("✅ Successfully deleted board %d and related data from Firestore\n", boardID)
+	// ลบBoarduser
+	for _, bu := range boardUsers {
+		docPath := fmt.Sprintf("Boards/%d/BoardUsers/%d", boardID, bu.BoardUserID) // หรือ notification.NotificationID ขึ้นอยู่กับ field name
+		if _, err := fb.Doc(docPath).Delete(ctx); err != nil {
+			return fmt.Errorf("failed to delete notification from Firestore: %w", err)
+		}
+	}
+	taskid, err := queryTaskByBoardID(db, boardID)
+	if err != nil {
+		return fmt.Errorf("failed to get board users for board %d: %w", boardID, err)
+	}
+	for _, task := range taskid {
+		docPath := fmt.Sprintf("Boards/%d/Tasks/%d", boardID, task.TaskID) // หรือ notification.NotificationID ขึ้นอยู่กับ field name
+		if _, err := fb.Doc(docPath).Delete(ctx); err != nil {
+			return fmt.Errorf("failed to delete notification from Firestore: %w", err)
+		}
+	}
+	// ลบmainboard
+	docPath := fmt.Sprintf("Boards/%d", boardID)
+	if _, err := fb.Doc(docPath).Delete(ctx); err != nil {
+		return fmt.Errorf("failed to delete main path for board %d: %w", boardID, err)
+	}
 	return nil
 }
