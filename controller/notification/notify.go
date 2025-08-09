@@ -7,8 +7,10 @@ import (
 	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"mydayplanner/services"
+	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"cloud.google.com/go/firestore"
 	firebase "firebase.google.com/go/v4"
@@ -31,6 +33,10 @@ func RemindNotificationTaskController(router *gin.Engine, db *gorm.DB, firestore
 	router.POST("/unassignedtaskNotify", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
 		UnAssignedTaskNotify(c, db, firestoreClient)
 	})
+	router.PUT("/snoozeNotify/:taskid", func(c *gin.Context) {
+		SnoozeNotification(c, db, firestoreClient)
+	})
+
 }
 
 func InviteBoardNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -391,4 +397,280 @@ func updateFirestoreInviteNotification(firestoreClient *firestore.Client, Reciev
 	} else {
 		fmt.Println("Firestore document updated successfully")
 	}
+}
+
+func SnoozeNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	var taskid = c.Param("taskid")
+
+	// แปลง taskid เป็น int
+	taskID, err := strconv.Atoi(taskid)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid task ID",
+			"message": "Task ID must be a number",
+		})
+		return
+	}
+
+	// ค้นหา task เพื่อเอา BoardID
+	var task model.Tasks
+	if err := db.Where("task_id = ?", taskID).First(&task).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "Task not found",
+				"message": "Task with given ID does not exist",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// ตรวจสอบว่า task มี BoardID หรือไม่
+	if task.BoardID == nil {
+		// หาก BoardID เป็น null ให้ดำเนินการแบบ private
+		snoozePrivate(c, db, firestoreClient, taskID)
+		return
+	}
+
+	// ตรวจสอบว่า BoardID นี้มีในตาราง BoardUser หรือไม่
+	var boardUser model.BoardUser
+	err = db.Where("board_id = ?", *task.BoardID).First(&boardUser).Error
+
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			// ไม่พบใน BoardUser ให้ดำเนินการแบบ private
+			snoozePrivate(c, db, firestoreClient, taskID)
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// พบใน BoardUser ให้ดำเนินการแบบ group
+	snoozeGroup(c, db, firestoreClient, taskID, *task.BoardID)
+}
+
+func snoozePrivate(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client, taskID int) {
+	// ค้นหา task เพื่อเอา CreateBy
+	var task model.Tasks
+	if err := db.Where("task_id = ?", taskID).Preload("Creator").First(&task).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Task not found",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// ตรวจสอบว่ามี CreateBy หรือไม่
+	if task.CreateBy == nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Task creator not found",
+			"message": "Cannot snooze notification without task creator",
+		})
+		return
+	}
+
+	// ดึง email ของผู้สร้าง task จาก user_id (task.CreateBy)
+	var creator model.User
+	if err := db.Where("user_id = ?", *task.CreateBy).First(&creator).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Task creator not found",
+			"message": err.Error(),
+		})
+		return
+	}
+	task.Creator = &creator
+
+	// ค้นหา notification ของ task นี้
+	var notification model.Notification
+	if err := db.Where("task_id = ?", taskID).First(&notification).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "Notification not found",
+				"message": "No notification found for this task",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// อัปเดทเวลา due_date เพิ่ม 10 นาที
+	newDueDate := notification.DueDate.Add(10 * time.Minute)
+
+	// อัปเดท beforedue_date ถ้ามี
+	var newBeforeDueDate *time.Time
+	if notification.BeforeDueDate != nil {
+		newBeforeDate := notification.BeforeDueDate.Add(10 * time.Minute)
+		newBeforeDueDate = &newBeforeDate
+	}
+
+	// อัปเดทข้อมูลในฐานข้อมูล
+	if err := db.Model(&notification).Updates(map[string]interface{}{
+		"due_date":       newDueDate,
+		"beforedue_date": newBeforeDueDate,
+		"is_send":        "0", // รีเซ็ตสถานะการส่ง
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Update failed",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// อัปเดท Firestore: /Notifications/{email}/Tasks/{notificationid}
+	if task.Creator != nil && task.Creator.Email != "" {
+		err := updatePrivateFirestore(firestoreClient, task.Creator.Email, notification.NotificationID, newDueDate, newBeforeDueDate)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"message":      "Private task notification snoozed successfully (Firestore update failed)",
+				"task_id":      taskID,
+				"new_due_date": newDueDate.Format("2006-01-02 15:04:05"),
+				"type":         "private",
+				"warning":      "Firestore update failed: " + err.Error(),
+			})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":      "Private task notification snoozed successfully",
+		"task_id":      taskID,
+		"new_due_date": newDueDate.Format("2006-01-02 15:04:05"),
+		"type":         "private",
+	})
+}
+
+func snoozeGroup(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client, taskID int, boardID int) {
+	// ค้นหา notification ของ task นี้
+	var notification model.Notification
+	if err := db.Where("task_id = ?", taskID).First(&notification).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "Notification not found",
+				"message": "No notification found for this task",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// อัปเดทเวลา due_date เพิ่ม 10 นาที
+	newDueDate := notification.DueDate.Add(10 * time.Minute)
+
+	// อัปเดท beforedue_date ถ้ามี
+	var newBeforeDueDate *time.Time
+	if notification.BeforeDueDate != nil {
+		newBeforeDate := notification.BeforeDueDate.Add(10 * time.Minute)
+		newBeforeDueDate = &newBeforeDate
+	}
+
+	// อัปเดทข้อมูลในฐานข้อมูล
+	if err := db.Model(&notification).Updates(map[string]interface{}{
+		"due_date":       newDueDate,
+		"beforedue_date": newBeforeDueDate,
+		"is_send":        "0", // รีเซ็ตสถานะการส่ง
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Update failed",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// อัปเดท Firestore: /BoardTasks/{taskid}/Notifications/{notificationid}
+	err := updateGroupFirestore(firestoreClient, taskID, notification.NotificationID, newDueDate, newBeforeDueDate)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"message":      "Group task notification snoozed successfully (Firestore update failed)",
+			"task_id":      taskID,
+			"board_id":     boardID,
+			"new_due_date": newDueDate.Format("2006-01-02 15:04:05"),
+			"type":         "group",
+			"warning":      "Firestore update failed: " + err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":      "Group task notification snoozed successfully",
+		"task_id":      taskID,
+		"board_id":     boardID,
+		"new_due_date": newDueDate.Format("2006-01-02 15:04:05"),
+		"type":         "group",
+	})
+}
+
+// ฟังก์ชันอัปเดท Firestore สำหรับ Private Task
+func updatePrivateFirestore(firestoreClient *firestore.Client, email string, notificationID int, newDueDate time.Time, newBeforeDueDate *time.Time) error {
+	ctx := context.Background()
+
+	// สร้าง document reference: /Notifications/{email}/Tasks/{notificationid}
+	docRef := firestoreClient.Collection("Notifications").Doc(email).Collection("Tasks").Doc(strconv.Itoa(notificationID))
+
+	// เตรียมข้อมูลที่จะอัปเดท
+	updateData := map[string]interface{}{
+		"dueDate": newDueDate,
+		"isSend":  "0",
+	}
+
+	// เพิ่ม beforeDueDate หากมี
+	if newBeforeDueDate != nil {
+		updateData["beforeDueDate"] = *newBeforeDueDate
+	} else {
+		updateData["beforeDueDate"] = nil
+	}
+
+	// อัปเดทข้อมูลใน Firestore
+	_, err := docRef.Update(ctx, []firestore.Update{
+		{Path: "dueDate", Value: updateData["dueDate"]},
+		{Path: "beforeDueDate", Value: updateData["beforeDueDate"]},
+		{Path: "isSend", Value: updateData["isSend"]},
+	})
+
+	return err
+}
+
+// ฟังก์ชันอัปเดท Firestore สำหรับ Group Task
+func updateGroupFirestore(firestoreClient *firestore.Client, taskID int, notificationID int, newDueDate time.Time, newBeforeDueDate *time.Time) error {
+	ctx := context.Background()
+
+	// สร้าง document reference: /BoardTasks/{taskid}/Notifications/{notificationid}
+	docRef := firestoreClient.Collection("BoardTasks").Doc(strconv.Itoa(taskID)).Collection("Notifications").Doc(strconv.Itoa(notificationID))
+
+	// เตรียมข้อมูลที่จะอัปเดท
+	updateData := map[string]interface{}{
+		"dueDate": newDueDate,
+		"isSend":  "0",
+	}
+
+	// เพิ่ม beforeDueDate หากมี
+	if newBeforeDueDate != nil {
+		updateData["beforeDueDate"] = *newBeforeDueDate
+	} else {
+		updateData["beforeDueDate"] = nil
+	}
+
+	// อัปเดทข้อมูลใน Firestore
+	_, err := docRef.Update(ctx, []firestore.Update{
+		{Path: "dueDate", Value: updateData["dueDate"]},
+		{Path: "beforeDueDate", Value: updateData["beforeDueDate"]},
+		{Path: "isSend", Value: updateData["isSend"]},
+	})
+
+	return err
 }
