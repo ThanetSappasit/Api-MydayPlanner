@@ -21,6 +21,9 @@ func FinishTaskController(router *gin.Engine, db *gorm.DB, firestoreClient *fire
 	router.PUT("/updatestatus/:taskid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
 		UpdateTaskStatus(c, db, firestoreClient)
 	})
+	router.PUT("/markasdoneTask/:taskid", middleware.AccessTokenMiddleware(), func(c *gin.Context) {
+		MarkAsdoneTaskStatus(c, db, firestoreClient)
+	})
 }
 
 // ฟังก์ชั่นสำหรับเปลี่ยน status ของ task เป็น complete (2)
@@ -245,6 +248,86 @@ func UpdateTaskStatus(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 					log.Printf("Failed to update isSend in Firestore (Notifications/Tasks): %v", err)
 				}
 			}
+		}
+	}
+
+	// === ส่งข้อความตามสถานะ ===
+	var message string
+	switch req.Status {
+	case "0":
+		message = "Task moved to todo"
+	case "1":
+		message = "Task started"
+	case "2":
+		message = "Task completed"
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": message,
+		"taskID":  taskID,
+	})
+}
+
+func MarkAsdoneTaskStatus(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	userID := c.MustGet("userId").(uint)
+	taskID := c.Param("taskid")
+
+	var email string
+	if err := db.Raw("SELECT email FROM user WHERE user_id = ?", userID).Scan(&email).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user data"})
+		return
+	}
+
+	var currentTask model.Tasks
+	if err := db.Where("task_id = ?", taskID).First(&currentTask).Error; err != nil {
+		status := http.StatusInternalServerError
+		if err == gorm.ErrRecordNotFound {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": "Task not found"})
+		return
+	}
+	var statusTask string
+	switch currentTask.Status {
+	case "0", "1":
+		statusTask = "2"
+	default:
+		statusTask = currentTask.Status
+	}
+
+	var req struct{ Status string }
+	req.Status = statusTask
+
+	// อัปเดต status ใน SQL
+	if err := db.Model(&currentTask).Update("status", req.Status).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update task status"})
+		return
+	}
+
+	ctx := context.Background()
+
+	// === 🔍 ตรวจสอบว่า board นี้เป็น group หรือไม่ ===
+	var boardgroup model.BoardUser
+	if currentTask.BoardID != nil {
+		err := db.Where("board_id = ?", *currentTask.BoardID).First(&boardgroup).Error
+		if err == nil {
+
+		}
+	}
+
+	// === 🔥 Firestore: update status เสมอ ===
+	if currentTask.BoardID != nil {
+		boardTaskRef := firestoreClient.
+			Collection("Boards").
+			Doc(fmt.Sprint(*currentTask.BoardID)).
+			Collection("Tasks").
+			Doc(fmt.Sprint(currentTask.TaskID))
+
+		_, err := boardTaskRef.Update(ctx, []firestore.Update{
+			{Path: "status", Value: req.Status},
+		})
+		if err != nil {
+			log.Printf("Failed to update Firestore (Boards/Tasks): %v", err)
 		}
 	}
 
