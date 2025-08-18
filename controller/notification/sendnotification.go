@@ -108,9 +108,20 @@ func SendNotificationJob(db *gorm.DB, firestoreClient *firestore.Client) {
 
 	log.Printf("✅ Notification job completed - Success: %d, Error: %d, Total: %d",
 		result.SuccessCount, result.ErrorCount, result.TotalCount)
+
+	time.Sleep(2 * time.Second)
+
+	// 3. ประมวลผล recurring tasks ทันที
+	log.Println("🔄 Processing recurring notifications...")
+	repeatResult, err := ProcessRepeatNotifications(db, firestoreClient)
+	if err != nil {
+		log.Printf("⚠️ Warning: Recurring notification error: %v", err)
+	} else {
+		log.Printf("✅ Recurring notifications completed - Success: %d, Error: %d, Total: %d",
+			repeatResult.SuccessCount, repeatResult.ErrorCount, repeatResult.TotalCount)
+	}
 }
 
-// Business Logic - แยกออกมาใช้ร่วมกัน
 func ProcessNotifications(db *gorm.DB, firestoreClient *firestore.Client) (*NotificationResult, error) {
 	// โหลด environment variables
 	if err := godotenv.Load(); err != nil {

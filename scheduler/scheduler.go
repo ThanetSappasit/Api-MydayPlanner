@@ -32,12 +32,12 @@ func StartScheduler() {
 	}
 
 	// Job ที่รันทุกชั่วโมง (ใช้ minutes format: "0 * * * *")
-	if _, err := c.AddFunc("0 0 0 * * *", func() {
-		log.Println("Running midnight daily task...")
-		notification.RepeatNotificationJob(DB, FB)
-	}); err != nil {
-		log.Fatalf("Failed to add RepeatNotificationJob cron: %v", err)
-	}
+	// if _, err := c.AddFunc("0 0 0 * * *", func() {
+	// 	log.Println("Running midnight daily task...")
+	// 	notification.RepeatNotificationJob(DB, FB)
+	// }); err != nil {
+	// 	log.Fatalf("Failed to add RepeatNotificationJob cron: %v", err)
+	// }
 
 	c.Start()
 	log.Println("Scheduler started")

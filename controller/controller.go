@@ -2,46 +2,13 @@ package controller
 
 import (
 	"mydayplanner/controller/user"
-	"mydayplanner/middleware"
 
-	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
-
-func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-	routes := router.Group("/user", middleware.AccessTokenMiddleware())
-	{
-		// routes.GET("/data", func(c *gin.Context) {
-		// 	user.GetAllDataFirebase(c, db, firestoreClient)
-		// })
-		routes.GET("/data", func(c *gin.Context) {
-			user.AllDataUser(c, db, firestoreClient)
-		})
-		routes.GET("/alluser", func(c *gin.Context) {
-			user.GetAllUser(c, db, firestoreClient)
-		})
-		routes.POST("/search", func(c *gin.Context) {
-			user.SearchUser(c, db)
-		})
-		routes.PUT("/profile", func(c *gin.Context) {
-			user.UpdateProfileUser(c, db, firestoreClient)
-		})
-		routes.PUT("/removepassword", func(c *gin.Context) {
-			user.RemovePassword(c, db, firestoreClient)
-		})
-		routes.DELETE("/account", func(c *gin.Context) {
-			user.DeleteUser(c, db, firestoreClient)
-		})
-	}
-}
 
 func GetemailCTL(router *gin.Engine, db *gorm.DB) {
 	router.POST("/email", func(c *gin.Context) {
 		user.GetEmail(c, db)
 	})
-}
-
-func BoardController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
-
 }

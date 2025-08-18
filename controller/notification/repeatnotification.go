@@ -30,18 +30,18 @@ type RepeatNotificationResult struct {
 	ErrorCount   int    `json:"error_count"`
 }
 
-func RepeatNotificationJob(db *gorm.DB, firestoreClient *firestore.Client) {
-	log.Println("🔄 Starting repeat notification cron job...")
+// func RepeatNotificationJob(db *gorm.DB, firestoreClient *firestore.Client) {
+// 	log.Println("🔄 Starting repeat notification cron job...")
 
-	result, err := ProcessRepeatNotifications(db, firestoreClient)
-	if err != nil {
-		log.Printf("❌ Repeat notification job error: %v", err)
-		return
-	}
+// 	result, err := ProcessRepeatNotifications(db, firestoreClient)
+// 	if err != nil {
+// 		log.Printf("❌ Repeat notification job error: %v", err)
+// 		return
+// 	}
 
-	log.Printf("✅ Repeat notification job completed - Success: %d, Error: %d, Total: %d",
-		result.SuccessCount, result.ErrorCount, result.TotalCount)
-}
+// 	log.Printf("✅ Repeat notification job completed - Success: %d, Error: %d, Total: %d",
+// 		result.SuccessCount, result.ErrorCount, result.TotalCount)
+// }
 
 func ProcessRepeatNotifications(db *gorm.DB, firestoreClient *firestore.Client) (*RepeatNotificationResult, error) {
 	now := time.Now().UTC()

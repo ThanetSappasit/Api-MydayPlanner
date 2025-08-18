@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"mydayplanner/dto"
+	"mydayplanner/middleware"
 	"mydayplanner/model"
 	"net/http"
 	"strings"
@@ -15,6 +16,87 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
+
+func UserController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
+	routes := router.Group("/user", middleware.AccessTokenMiddleware())
+	{
+		routes.GET("/data", func(c *gin.Context) {
+			AllDataUser(c, db, firestoreClient)
+		})
+		routes.GET("/alluser", func(c *gin.Context) {
+			GetAllUser(c, db, firestoreClient)
+		})
+		routes.POST("/search", func(c *gin.Context) {
+			SearchUser(c, db)
+		})
+		routes.PUT("/profile", func(c *gin.Context) {
+			UpdateProfileUser(c, db, firestoreClient)
+		})
+		routes.PUT("/removepassword", func(c *gin.Context) {
+			RemovePassword(c, db, firestoreClient)
+		})
+		routes.DELETE("/account", func(c *gin.Context) {
+			DeleteUser(c, db, firestoreClient)
+		})
+	}
+}
+
+func GetAllUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
+	var users []map[string]interface{}
+	if err := db.Table("user").Select("user_id, email, name, role, profile, is_active, is_verify, create_at").Scan(&users).Error; err != nil {
+		c.JSON(500, gin.H{"error": "Database error"})
+		return
+	}
+	c.JSON(200, users)
+}
+
+func SearchUser(c *gin.Context, db *gorm.DB) {
+	var emailReq dto.EmailText
+	if err := c.ShouldBindJSON(&emailReq); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+		return
+	}
+
+	searchPattern := "%" + emailReq.Email + "%"
+
+	var users []model.User
+	if err := db.Where("email LIKE ? AND is_verify != ? AND is_active = ?", searchPattern, "0", "1").Find(&users).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	if len(users) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"message": "No matching users found"})
+		return
+	}
+
+	// map ข้อมูลแต่ละ user -> response (ไม่รวม password)
+	var userResponses []interface{}
+	for _, user := range users {
+		userResp := struct {
+			UserID    int    `json:"user_id"`
+			Name      string `json:"name"`
+			Email     string `json:"email"`
+			Profile   string `json:"profile"`
+			Role      string `json:"role"`
+			IsVerify  string `json:"is_verify"`
+			IsActive  string `json:"is_active"`
+			CreatedAt string `json:"created_at"`
+		}{
+			UserID:    user.UserID,
+			Name:      user.Name,
+			Email:     user.Email,
+			Profile:   user.Profile,
+			Role:      user.Role,
+			IsVerify:  user.IsVerify,
+			IsActive:  user.IsActive,
+			CreatedAt: user.CreatedAt.Format(time.RFC3339),
+		}
+		userResponses = append(userResponses, userResp)
+	}
+
+	c.JSON(http.StatusOK, userResponses)
+}
 
 func UpdateProfileUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
@@ -198,15 +280,6 @@ func DeleteUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) 
 	}
 }
 
-func GetAllUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
-	var users []map[string]interface{}
-	if err := db.Table("user").Select("user_id, email, name, role, profile, is_active, is_verify, create_at").Scan(&users).Error; err != nil {
-		c.JSON(500, gin.H{"error": "Database error"})
-		return
-	}
-	c.JSON(200, users)
-}
-
 func RemovePassword(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	userId := c.MustGet("userId").(uint)
 
@@ -330,54 +403,6 @@ func RemovePassword(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clie
 	c.JSON(http.StatusOK, gin.H{
 		"message": message,
 	})
-}
-
-func SearchUser(c *gin.Context, db *gorm.DB) {
-	var emailReq dto.EmailText
-	if err := c.ShouldBindJSON(&emailReq); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
-		return
-	}
-
-	searchPattern := "%" + emailReq.Email + "%"
-
-	var users []model.User
-	if err := db.Where("email LIKE ? AND is_verify != ? AND is_active = ?", searchPattern, "0", "1").Find(&users).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-
-	if len(users) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"message": "No matching users found"})
-		return
-	}
-
-	// map ข้อมูลแต่ละ user -> response (ไม่รวม password)
-	var userResponses []interface{}
-	for _, user := range users {
-		userResp := struct {
-			UserID    int    `json:"user_id"`
-			Name      string `json:"name"`
-			Email     string `json:"email"`
-			Profile   string `json:"profile"`
-			Role      string `json:"role"`
-			IsVerify  string `json:"is_verify"`
-			IsActive  string `json:"is_active"`
-			CreatedAt string `json:"created_at"`
-		}{
-			UserID:    user.UserID,
-			Name:      user.Name,
-			Email:     user.Email,
-			Profile:   user.Profile,
-			Role:      user.Role,
-			IsVerify:  user.IsVerify,
-			IsActive:  user.IsActive,
-			CreatedAt: user.CreatedAt.Format(time.RFC3339),
-		}
-		userResponses = append(userResponses, userResp)
-	}
-
-	c.JSON(http.StatusOK, userResponses)
 }
 
 func GetEmail(c *gin.Context, db *gorm.DB) {
