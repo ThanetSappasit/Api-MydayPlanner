@@ -13,6 +13,7 @@ import (
 	"mydayplanner/controller/report"
 	"mydayplanner/controller/shareboard"
 	"mydayplanner/controller/task"
+	"mydayplanner/controller/user"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -71,6 +72,7 @@ func StartServer() {
 	shareboard.ShareboardController(router, DB, FB)
 
 	controller.GetemailCTL(router, DB)
+	user.UserController(router, DB, FB)
 
 	router.Run()
 }
