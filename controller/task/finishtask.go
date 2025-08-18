@@ -79,7 +79,7 @@ func CompleteTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 	}
 
 	// อัปเดต is_send ใน SQL
-	if err := db.Model(&notification).Update("is_send", true).Error; err != nil {
+	if err := db.Model(&notification).Update("is_send", "2").Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update is_send in SQL"})
 		return
 	}
@@ -109,7 +109,7 @@ func CompleteTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 			Doc(fmt.Sprint(notification.NotificationID))
 
 		_, err = notiRef.Update(ctx, []firestore.Update{
-			{Path: "isSend", Value: true},
+			{Path: "isSend", Value: "2"},
 		})
 		if err != nil {
 			log.Printf("Failed to update isSend in Firestore (BoardTasks/Notifications): %v", err)
@@ -123,7 +123,7 @@ func CompleteTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 			Doc(fmt.Sprint(notification.NotificationID))
 
 		_, err := notiRef.Update(ctx, []firestore.Update{
-			{Path: "isSend", Value: true},
+			{Path: "isSend", Value: "2"},
 		})
 		if err != nil {
 			log.Printf("Failed to update isSend in Firestore (Notifications/Tasks): %v", err)
@@ -228,7 +228,7 @@ func UpdateTaskStatus(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 					Doc(fmt.Sprint(notification.NotificationID))
 
 				_, err := notiRef.Update(ctx, []firestore.Update{
-					{Path: "isSend", Value: true},
+					{Path: "isSend", Value: "2"},
 				})
 				if err != nil {
 					log.Printf("Failed to update isSend in Firestore (BoardTasks/Notifications): %v", err)
@@ -242,7 +242,7 @@ func UpdateTaskStatus(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 					Doc(fmt.Sprint(currentTask.TaskID))
 
 				_, err := notiRef.Update(ctx, []firestore.Update{
-					{Path: "isSend", Value: true},
+					{Path: "isSend", Value: "2"},
 				})
 				if err != nil {
 					log.Printf("Failed to update isSend in Firestore (Notifications/Tasks): %v", err)
