@@ -208,12 +208,12 @@ func Signin(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 
 	// อัปเดตข้อมูลการเข้าสู่ระบบใน Firestore
 	loginData := map[string]interface{}{
-		"email":      request.Email,
-		"active":     user.IsActive,
-		"verify":     user.IsVerify,
-		"login":      1,
-		"role":       role,
-		"updated_at": now,
+		"email":     request.Email,
+		"active":    user.IsActive,
+		"verify":    user.IsVerify,
+		"login":     1,
+		"role":      role,
+		"updatedAt": now,
 	}
 
 	// บันทึกข้อมูลการเข้าสู่ระบบใน Firestore
@@ -559,12 +559,12 @@ func GoogleSignIn(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 
 	// เตรียมข้อมูลสำหรับบันทึกใน Firebase
 	firebaseData := map[string]interface{}{
-		"email":      req.Email,
-		"active":     isActive,
-		"verify":     isVerify,
-		"login":      1,
-		"role":       role,
-		"updated_at": now,
+		"email":     req.Email,
+		"active":    isActive,
+		"verify":    isVerify,
+		"login":     1,
+		"role":      role,
+		"updatedAt": now,
 	}
 
 	// บันทึกข้อมูลการเข้าสู่ระบบใน Firestore

@@ -697,12 +697,12 @@ func VerifyOTP(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		isVerify := "1"
 		// บันทึกหรืออัปเดตข้อมูลใน Firebase collection "usersLogin"
 		_, err = firestoreClient.Collection("usersLogin").Doc(otpRecord.Email).Set(ctx, map[string]interface{}{
-			"email":      otpRecord.Email,
-			"active":     isActive,
-			"verify":     isVerify,
-			"login":      0,
-			"role":       role,
-			"updated_at": time.Now(),
+			"email":     otpRecord.Email,
+			"active":    isActive,
+			"verify":    isVerify,
+			"login":     0,
+			"role":      role,
+			"updatedAt": time.Now(),
 		}, firestore.MergeAll)
 
 		if err != nil {
