@@ -155,7 +155,7 @@ func Signin(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 
 	// ตรวจสอบการยืนยันบัญชี
 	if user.IsVerify != "1" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "User account is not verified"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "User account is not verified", "role": user.Role})
 		return
 	}
 
@@ -455,6 +455,23 @@ func GoogleSignIn(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 					"message": "เกิดข้อผิดพลาดในการอัปเดตสถานะยืนยันบัญชี",
 				})
 				return
+			}
+
+			// ถ้าอัปเดตสำเร็จ และ user เป็น admin ให้แก้ hashed_password = "-"
+			if user.Role == "admin" {
+				if err := tx.Model(&model.User{}).
+					Where("user_id = ?", user.UserID).
+					Update("hashed_password", "-").Error; err != nil {
+
+					tx.Rollback()
+					log.Printf("Failed to update hashed_password for admin: %v", err)
+
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"success": false,
+						"message": "เกิดข้อผิดพลาดในการอัปเดตรหัสผ่านสำหรับแอดมิน",
+					})
+					return
+				}
 			}
 
 		}
