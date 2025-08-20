@@ -72,54 +72,80 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		CreateBy *int `gorm:"column:create_by"`
 	}
 
+	// กำหนดค่าเริ่มต้นเมื่อไม่พบ task
+	shouldSaveToFirestore := false
+	boardmember := false
+	taskNotFound := false
+
 	if err := db.Table("tasks").
 		Select("task_id, board_id, create_by").
 		Where("task_id = ?", taskIDInt).
 		First(&task).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch task"})
-		}
-		return
-	}
+			// ไม่พบ task - สร้าง notification record ใหม่
+			taskNotFound = true
 
-	// ตรวจสอบสิทธิ์การเข้าถึงและกำหนด shouldSaveToFirestore
-	shouldSaveToFirestore := false
-	boardmember := false
+			// เพิ่มข้อมูลลง notification table สำหรับ task ที่ไม่พบ
+			newNotification := model.Notification{
+				TaskID:           taskIDInt,
+				RecurringPattern: "onetime", // ตามค่าเริ่มต้นใน model
+				IsSend:           "0",       // ตามค่าเริ่มต้นใน model (enum '0','1','2','')
+				// CreatedAt จะถูกตั้งค่าอัตโนมัติด้วย autoCreateTime
+			}
 
-	if task.BoardID == nil {
-		// Today task - ตรวจสอบว่าเป็นเจ้าของ task
-		if task.CreateBy == nil || uint(*task.CreateBy) != userId {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not the owner of this personal task"})
-			return
-		}
-		shouldSaveToFirestore = false
-		boardmember = false
-	} else {
-		// Board task - ตรวจสอบการเข้าถึงบอร์ด
-		var boardUser model.BoardUser
-		if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userId).First(&boardUser).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				// ไม่ใช่ board member, ตรวจสอบว่าเป็น board owner หรือไม่
-				var board model.Board
-				if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userId).First(&board).Error; err != nil {
-					if errors.Is(err, gorm.ErrRecordNotFound) {
-						c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or board owner"})
-					} else {
-						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
-					}
-					return
-				}
-				shouldSaveToFirestore = true // Board owner
-				boardmember = false
-			} else {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
+			// สร้าง notification record ใหม่
+			if err := db.Create(&newNotification).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create notification for missing task"})
 				return
 			}
+
+			// อัปเดต notification variable เป็น record ใหม่
+			notification = newNotification
+
+			// กำหนดค่าสำหรับ task ที่ไม่พบ
+			shouldSaveToFirestore = false
+			boardmember = false
 		} else {
-			shouldSaveToFirestore = true // Board member
-			boardmember = true
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch task"})
+			return
+		}
+	}
+
+	// ถ้า task พบ ให้ตรวจสอบสิทธิ์การเข้าถึงตามปกติ
+	if !taskNotFound {
+		if task.BoardID == nil {
+			// Today task - ตรวจสอบว่าเป็นเจ้าของ task
+			if task.CreateBy == nil || uint(*task.CreateBy) != userId {
+				c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not the owner of this personal task"})
+				return
+			}
+			shouldSaveToFirestore = false
+			boardmember = false
+		} else {
+			// Board task - ตรวจสอบการเข้าถึงบอร์ด
+			var boardUser model.BoardUser
+			if err := db.Where("board_id = ? AND user_id = ?", task.BoardID, userId).First(&boardUser).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					// ไม่ใช่ board member, ตรวจสอบว่าเป็น board owner หรือไม่
+					var board model.Board
+					if err := db.Where("board_id = ? AND create_by = ?", task.BoardID, userId).First(&board).Error; err != nil {
+						if errors.Is(err, gorm.ErrRecordNotFound) {
+							c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: not a board member or board owner"})
+						} else {
+							c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify board ownership"})
+						}
+						return
+					}
+					shouldSaveToFirestore = true // Board owner
+					boardmember = false
+				} else {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch board user"})
+					return
+				}
+			} else {
+				shouldSaveToFirestore = true // Board member
+				boardmember = true
+			}
 		}
 	}
 
@@ -193,22 +219,26 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		notification.IsSend = *req.IsSend
 	}
 
-	// If no updates provided, return error
-	if len(updates) == 0 {
+	// If no updates provided and this is not a newly created notification, return error
+	if len(updates) == 0 && !taskNotFound {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
 		return
 	}
 
-	// Update in database
-	if err := db.Model(&notification).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
-		return
+	// Update in database (only if there are updates or if it's not a newly created record)
+	if len(updates) > 0 {
+		if err := db.Model(&notification).Updates(updates).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
+			return
+		}
 	}
 
-	// Update in Firebase with only the modified fields
-	if err := updateFirebaseNotification(firestoreClient, user, notification, updates, shouldSaveToFirestore, boardmember); err != nil {
-		// Log the error but don't fail the request since DB update succeeded
-		fmt.Printf("Warning: Failed to update Firebase notification: %v\n", err)
+	// Update in Firebase with only the modified fields (only if there are updates)
+	if len(updates) > 0 {
+		if err := updateFirebaseNotification(firestoreClient, user, notification, updates, shouldSaveToFirestore, boardmember); err != nil {
+			// Log the error but don't fail the request since DB update succeeded
+			fmt.Printf("Warning: Failed to update Firebase notification: %v\n", err)
+		}
 	}
 
 	// Prepare response data with proper null handling
@@ -219,6 +249,9 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		"is_send":           notification.IsSend,
 		"created_at":        notification.CreatedAt,
 	}
+
+	// Add task_found status to response
+	responseData["task_found"] = !taskNotFound
 
 	// Handle nullable fields properly
 	if notification.DueDate != nil {
@@ -239,8 +272,16 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		responseData["snooze"] = nil
 	}
 
+	// Adjust success message based on whether task was found
+	var message string
+	if taskNotFound {
+		message = "Notification created for missing task and updated successfully"
+	} else {
+		message = "Notification updated successfully"
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message":      "Notification updated successfully",
+		"message":      message,
 		"notification": responseData,
 	})
 }
