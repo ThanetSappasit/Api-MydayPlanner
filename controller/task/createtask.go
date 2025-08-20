@@ -193,7 +193,7 @@ func (s *TaskService) createTaskWithTransaction(taskReq *dto.CreateTaskRequest, 
 
 	// Handle notification if provided and DueDate is not empty
 	var notification *model.Notification
-	if taskReq.Reminder != nil && strings.TrimSpace(taskReq.Reminder.DueDate) != "" {
+	if taskReq.Reminder != nil && isValidDueDate(taskReq.Reminder.DueDate) {
 		notif, err := s.createNotificationInTx(tx, uint(task.TaskID), taskReq.Reminder)
 		if err != nil {
 			return nil, nil, err
@@ -232,9 +232,9 @@ func (s *TaskService) createTodayTaskWithTransaction(taskReq *dto.CreateTodayTas
 		return nil, nil, fmt.Errorf("failed to create task: %w", err)
 	}
 
-	// Handle notification only if reminder exists and DueDate is not empty
+	// Handle notification only if reminder exists and DueDate is valid
 	var notification *model.Notification
-	if taskReq.Reminder != nil && strings.TrimSpace(taskReq.Reminder.DueDate) != "" {
+	if taskReq.Reminder != nil && isValidDueDate(taskReq.Reminder.DueDate) {
 		notif, err := s.createNotificationInTx(tx, uint(task.TaskID), taskReq.Reminder)
 		if err != nil {
 			return nil, nil, err
@@ -252,14 +252,14 @@ func (s *TaskService) createTodayTaskWithTransaction(taskReq *dto.CreateTodayTas
 
 // สร้างการแจ้งเตือนใน sql
 func (s *TaskService) createNotificationInTx(tx *gorm.DB, taskID uint, reminder *dto.Reminder) (*model.Notification, error) {
-	parsedDueDate, err := parseDateTime(reminder.DueDate)
+	parsedDueDate, err := parseDateTime(*reminder.DueDate) // dereference pointer
 	if err != nil {
 		return nil, fmt.Errorf("invalid DueDate format: %w", err)
 	}
 
 	var parsedBeforeDueDate *time.Time
-	if reminder.BeforeDueDate != nil && *reminder.BeforeDueDate != "" {
-		beforeDue, err := parseDateTime(*reminder.BeforeDueDate)
+	if isValidDueDate(reminder.BeforeDueDate) {
+		beforeDue, err := parseDateTime(*reminder.BeforeDueDate) // dereference pointer
 		if err != nil {
 			return nil, fmt.Errorf("invalid BeforeDueDate format: %w", err)
 		}
@@ -268,7 +268,7 @@ func (s *TaskService) createNotificationInTx(tx *gorm.DB, taskID uint, reminder 
 
 	notification := &model.Notification{
 		TaskID:           int(taskID),
-		DueDate:          parsedDueDate,
+		DueDate:          &parsedDueDate, // แปลงเป็น pointer
 		BeforeDueDate:    parsedBeforeDueDate,
 		RecurringPattern: reminder.RecurringPattern,
 		IsSend: func() string {
@@ -371,12 +371,12 @@ func (s *TaskService) saveNotificationToFirestore(notification *model.Notificati
 		"updatedAt":      time.Now(),
 	}
 
-	// Add recurring pattern if exists
+	// Add optional fields safely
 	if notification.RecurringPattern != "" {
 		notificationData["recurringPattern"] = notification.RecurringPattern
 	}
 
-	if notification.RecurringPattern != "" {
+	if notification.BeforeDueDate != nil {
 		notificationData["beforeDueDate"] = notification.BeforeDueDate
 	}
 
@@ -396,6 +396,11 @@ func intToPtr(i int) *int {
 	return &i
 }
 
+func isValidDueDate(datePtr *string) bool {
+	return datePtr != nil && strings.TrimSpace(*datePtr) != ""
+}
+
+// แก้ไขฟังก์ชัน parseDateTime ให้รองรับมากขึ้น
 func parseDateTime(dateStr string) (time.Time, error) {
 	// ตรวจสอบ empty string ก่อน
 	if dateStr == "" {
@@ -410,10 +415,17 @@ func parseDateTime(dateStr string) (time.Time, error) {
 
 	formats := []string{
 		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05.000000",
 		"2006-01-02 15:04:05",
-		time.RFC3339,
 		"2006-01-02T15:04:05.999999Z07:00",
+		"2006-01-02T15:04:05.000000Z07:00",
 		"2006-01-02T15:04:05Z07:00",
+		"2006-01-02T15:04:05.999999Z",
+		"2006-01-02T15:04:05.000000Z",
+		"2006-01-02T15:04:05Z",
+		time.RFC3339,
+		time.RFC3339Nano,
+		"2006-01-02",
 	}
 
 	for _, format := range formats {

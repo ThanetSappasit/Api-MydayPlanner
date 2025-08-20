@@ -660,30 +660,6 @@ func DeleteUserOnboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.C
 		taskIDs = append(taskIDs, task.TaskID)
 	}
 
-	// ค้นหา Assigned records ที่ตรงกับ TaskIDs และ UserID
-	var assignedRecords []model.Assigned
-	if len(taskIDs) > 0 {
-		if err := db.Where("task_id IN ? AND user_id = ?", taskIDs, req.UserID).Find(&assignedRecords).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch assigned records"})
-			return
-		}
-	}
-
-	// ลบ Assigned records จาก SQL และ Firestore
-	for _, assigned := range assignedRecords {
-
-		// ลบจาก Firestore
-		firestoreAssignedPath := fmt.Sprintf("BoardTasks/%d/Assigned/%d", assigned.TaskID, assigned.AssID)
-		_, err := firestoreClient.Doc(firestoreAssignedPath).Delete(c)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":         fmt.Sprintf("Deleted assigned %d from SQL, but failed to delete from Firestore", assigned.AssID),
-				"firestorePath": firestoreAssignedPath,
-			})
-			return
-		}
-	}
-
 	// ลบ BoardUser จาก SQL
 	if err := db.Delete(&boardUser).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete BoardUser from SQL"})
@@ -702,7 +678,6 @@ func DeleteUserOnboard(c *gin.Context, db *gorm.DB, firestoreClient *firestore.C
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":            "BoardUser and associated assignments deleted successfully",
-		"deletedAssignments": len(assignedRecords),
+		"message": "BoardUser and associated assignments deleted successfully",
 	})
 }

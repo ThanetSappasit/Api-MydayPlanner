@@ -239,18 +239,6 @@ func deleteSubCollectionByTaskID(db *gorm.DB, fb *firestore.Client, taskID int) 
 		}
 	}
 
-	// Delete Assigned
-	var assigned []model.Assigned
-	if err := db.Where("task_id = ?", taskID).Find(&assigned).Error; err != nil {
-		return fmt.Errorf("failed to find assigned: %w", err)
-	}
-	for _, ass := range assigned {
-		docPath := fmt.Sprintf("BoardTasks/%d/Assigned/%d", taskID, ass.AssID) // หรือ ass.AssID
-		if _, err := fb.Doc(docPath).Delete(ctx); err != nil {
-			return fmt.Errorf("failed to delete assigned from Firestore: %w", err)
-		}
-	}
-
 	// Delete Attachments
 	var attachments []model.Attachment
 	if err := db.Where("tasks_id = ?", taskID).Find(&attachments).Error; err != nil {

@@ -21,11 +21,6 @@ type TaskRelatedData struct {
 	Checklists    []model.Checklist
 	Attachments   []model.Attachment
 	Notifications []model.Notification
-	Assigned      []struct {
-		model.Assigned
-		UserName string `gorm:"column:user_name"`
-		Email    string `gorm:"column:email"`
-	}
 }
 
 func AllDataUser(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
@@ -463,11 +458,6 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 	var checklists []model.Checklist
 	var attachments []model.Attachment
 	var notifications []model.Notification
-	var assigned []struct {
-		model.Assigned
-		UserName string `gorm:"column:user_name"`
-		Email    string `gorm:"column:email"`
-	}
 	errorChan := make(chan error, 4)
 
 	// Fetch checklists
@@ -530,7 +520,6 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 		Checklists:    checklists,
 		Attachments:   attachments,
 		Notifications: notifications,
-		Assigned:      assigned,
 	}, nil
 }
 
