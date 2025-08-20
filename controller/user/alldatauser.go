@@ -353,7 +353,6 @@ func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint, userId uint) ([]ma
 	checklistsByTask := groupChecklistsByTask(relatedData.Checklists)
 	attachmentsByTask := groupAttachmentsByTask(relatedData.Attachments)
 	notificationsByTask := groupNotificationsByTask(relatedData.Notifications)
-	assignedByTask := groupAssignedByTask(relatedData.Assigned)
 
 	// Build result
 	tasks := make([]map[string]interface{}, 0, len(tasksData))
@@ -393,7 +392,6 @@ func fetchTasksDataOptimized(db *gorm.DB, allBoardIDs []uint, userId uint) ([]ma
 			"Checklists":    buildChecklistsMap(checklistsByTask[task.TaskID]),
 			"Attachments":   buildAttachmentsMap(attachmentsByTask[task.TaskID]),
 			"Notifications": buildNotificationsMap(notificationsByTask[task.TaskID]),
-			"Assigned":      buildAssignedMap(assignedByTask[task.TaskID]),
 		}
 		tasks = append(tasks, taskMap)
 	}
@@ -460,25 +458,6 @@ func buildNotificationsMap(notifications []model.Notification) []map[string]inte
 	return result
 }
 
-func buildAssignedMap(assigned []struct {
-	model.Assigned
-	UserName string `gorm:"column:user_name"`
-	Email    string `gorm:"column:email"`
-}) []map[string]interface{} {
-	result := make([]map[string]interface{}, 0, len(assigned))
-	for _, assign := range assigned {
-		result = append(result, map[string]interface{}{
-			"AssID":    assign.AssID,
-			"TaskID":   assign.TaskID,
-			"UserID":   assign.UserID,
-			"AssignAt": assign.AssignAt,
-			"UserName": assign.UserName,
-			"Email":    assign.Email,
-		})
-	}
-	return result
-}
-
 func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 	var wg sync.WaitGroup
 	var checklists []model.Checklist
@@ -539,28 +518,6 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 		notifications = notificationsData
 	}()
 
-	// Fetch assigned users
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		var assignedData []struct {
-			model.Assigned
-			UserName string `gorm:"column:user_name"`
-			Email    string `gorm:"column:email"`
-		}
-		if err := db.Raw(`SELECT a.ass_id, a.task_id, a.user_id, a.assign_at, u.name as user_name, u.email
-			FROM assigned a
-			LEFT JOIN user u ON a.user_id = u.user_id
-			WHERE a.task_id IN (?)`, taskIDs).Scan(&assignedData).Error; err != nil {
-			select {
-			case errorChan <- fmt.Errorf("failed to fetch assigned users: %w", err):
-			default:
-			}
-			return
-		}
-		assigned = assignedData
-	}()
-
 	wg.Wait()
 
 	select {
@@ -597,26 +554,6 @@ func groupNotificationsByTask(notifications []model.Notification) map[int][]mode
 	result := make(map[int][]model.Notification)
 	for _, notification := range notifications {
 		result[notification.TaskID] = append(result[notification.TaskID], notification)
-	}
-	return result
-}
-
-func groupAssignedByTask(assigned []struct {
-	model.Assigned
-	UserName string `gorm:"column:user_name"`
-	Email    string `gorm:"column:email"`
-}) map[int][]struct {
-	model.Assigned
-	UserName string `gorm:"column:user_name"`
-	Email    string `gorm:"column:email"`
-} {
-	result := make(map[int][]struct {
-		model.Assigned
-		UserName string `gorm:"column:user_name"`
-		Email    string `gorm:"column:email"`
-	})
-	for _, assign := range assigned {
-		result[assign.TaskID] = append(result[assign.TaskID], assign)
 	}
 	return result
 }
