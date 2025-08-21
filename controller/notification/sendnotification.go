@@ -58,6 +58,7 @@ type NotificationBatch struct {
 	Notification model.Notification
 	UpdateIsSend string
 	ShouldSend   bool
+	MessageType  string // "before", "due", "snooze", "recurring"
 }
 
 // NotificationResult สำหรับ return ผลลัพธ์
@@ -67,6 +68,7 @@ type NotificationResult struct {
 	TotalCount   int    `json:"total_count"`
 	SuccessCount int    `json:"success_count"`
 	ErrorCount   int    `json:"error_count"`
+	SkippedCount int    `json:"skipped_count"` // เพิ่ม field สำหรับนับงานที่ข้าม
 }
 
 // API Controller - เดิม
@@ -93,32 +95,45 @@ func SendNotification(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 		"total_count":   result.TotalCount,
 		"success_count": result.SuccessCount,
 		"error_count":   result.ErrorCount,
+		"skipped_count": result.SkippedCount, // เพิ่ม skipped_count ใน response
 	})
 }
 
-// Cron Job Function - ใหม่
+// Cron Job Function - Enhanced version
 func SendNotificationJob(db *gorm.DB, firestoreClient *firestore.Client) {
 	log.Println("🔔 Starting notification cron job...")
 
+	// 1. Process regular notifications
 	result, err := ProcessNotifications(db, firestoreClient)
 	if err != nil {
 		log.Printf("❌ Notification job error: %v", err)
-		return
+	} else {
+		log.Printf("✅ Regular notifications completed - Success: %d, Error: %d, Skipped: %d, Total: %d",
+			result.SuccessCount, result.ErrorCount, result.SkippedCount, result.TotalCount)
 	}
 
-	log.Printf("✅ Notification job completed - Success: %d, Error: %d, Total: %d",
-		result.SuccessCount, result.ErrorCount, result.TotalCount)
+	time.Sleep(1 * time.Second)
 
-	time.Sleep(2 * time.Second)
+	// 2. Process snooze notifications
+	log.Println("😴 Processing snooze notifications...")
+	snoozeResult, err := ProcessSnoozeNotifications(db, firestoreClient)
+	if err != nil {
+		log.Printf("⚠️ Warning: Snooze notification error: %v", err)
+	} else {
+		log.Printf("✅ Snooze notifications completed - Success: %d, Error: %d, Skipped: %d, Total: %d",
+			snoozeResult.SuccessCount, snoozeResult.ErrorCount, snoozeResult.SkippedCount, snoozeResult.TotalCount)
+	}
 
-	// 3. ประมวลผล recurring tasks ทันที
+	time.Sleep(1 * time.Second)
+
+	// 3. Process recurring notifications (daily at 7:00 AM Thailand time)
 	log.Println("🔄 Processing recurring notifications...")
-	repeatResult, err := ProcessRepeatNotifications(db, firestoreClient)
+	recurringResult, err := ProcessRecurringNotifications(db, firestoreClient)
 	if err != nil {
 		log.Printf("⚠️ Warning: Recurring notification error: %v", err)
 	} else {
-		log.Printf("✅ Recurring notifications completed - Success: %d, Error: %d, Total: %d",
-			repeatResult.SuccessCount, repeatResult.ErrorCount, repeatResult.TotalCount)
+		log.Printf("✅ Recurring notifications completed - Success: %d, Error: %d, Skipped: %d, Total: %d",
+			recurringResult.SuccessCount, recurringResult.ErrorCount, recurringResult.SkippedCount, recurringResult.TotalCount)
 	}
 }
 
@@ -143,7 +158,7 @@ func ProcessNotifications(db *gorm.DB, firestoreClient *firestore.Client) (*Noti
 
 	var notifications []model.Notification
 
-	// Query สำหรับ notifications ที่พร้อมส่งแล้ว พร้อม preload Task data
+	// Query สำหรับ notifications ที่พร้อมส่งแล้ว (ไม่รวม snooze และ recurring)
 	query := db.Preload("Task").Where(
 		"(is_send = '0' AND ((beforedue_date IS NOT NULL AND beforedue_date <= ?) OR (beforedue_date IS NULL AND due_date <= ?))) OR "+
 			"(is_send = '1' AND due_date <= ?)",
@@ -152,6 +167,14 @@ func ProcessNotifications(db *gorm.DB, firestoreClient *firestore.Client) (*Noti
 
 	if err := query.Find(&notifications).Error; err != nil {
 		return nil, fmt.Errorf("Failed to fetch notifications: %v", err)
+	}
+
+	// กรอง notifications ที่งานยังไม่เสร็จ (status != '2')
+	filteredNotifications := []model.Notification{}
+	for _, noti := range notifications {
+		if noti.Task.Status != "2" {
+			filteredNotifications = append(filteredNotifications, noti)
+		}
 	}
 
 	// สร้าง processor พร้อม cache
@@ -166,13 +189,14 @@ func ProcessNotifications(db *gorm.DB, firestoreClient *firestore.Client) (*Noti
 	}
 
 	// Preload ข้อมูลที่จำเป็น
-	processor.preloadData(notifications)
+	processor.preloadData(filteredNotifications)
 
 	successCount := 0
 	errorCount := 0
+	skippedCount := 0 // เพิ่ม counter สำหรับงานที่ข้าม
 
 	// สร้าง batches สำหรับการประมวลผล
-	batches := processor.prepareBatches(notifications, now)
+	batches := processor.prepareBatches(filteredNotifications, now)
 
 	// ประมวลผลแบบ concurrent
 	const maxWorkers = 10
@@ -188,15 +212,17 @@ func ProcessNotifications(db *gorm.DB, firestoreClient *firestore.Client) (*Noti
 				semaphore <- struct{}{}        // acquire semaphore
 				defer func() { <-semaphore }() // release semaphore
 
-				if processor.processNotificationConcurrent(b.Notification, b.UpdateIsSend, now, db) {
-					resultMu.Lock()
+				result := processor.processNotificationConcurrent(b.Notification, b.UpdateIsSend, b.MessageType, now, db)
+				resultMu.Lock()
+				switch result {
+				case "success":
 					successCount++
-					resultMu.Unlock()
-				} else {
-					resultMu.Lock()
+				case "skipped":
+					skippedCount++
+				case "error":
 					errorCount++
-					resultMu.Unlock()
 				}
+				resultMu.Unlock()
 			}(batch)
 		}
 	}
@@ -206,10 +232,313 @@ func ProcessNotifications(db *gorm.DB, firestoreClient *firestore.Client) (*Noti
 	return &NotificationResult{
 		Message:      "Notifications processed successfully",
 		CurrentTime:  now.Format(time.RFC3339),
-		TotalCount:   len(notifications),
+		TotalCount:   len(filteredNotifications),
 		SuccessCount: successCount,
 		ErrorCount:   errorCount,
+		SkippedCount: skippedCount,
 	}, nil
+}
+
+// ProcessSnoozeNotifications จัดการการแจ้งเตือน snooze
+func ProcessSnoozeNotifications(db *gorm.DB, firestoreClient *firestore.Client) (*NotificationResult, error) {
+	if err := godotenv.Load(); err != nil {
+		fmt.Println("Warning: No .env file found or failed to load")
+	}
+
+	now := time.Now().UTC()
+
+	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
+	if serviceAccountKeyPath == "" {
+		return nil, fmt.Errorf("Firebase credentials not configured")
+	}
+
+	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to initialize Firebase app: %s", err.Error())
+	}
+
+	var notifications []model.Notification
+
+	// Query สำหรับ snooze notifications (is_send = '3' และถึงเวลา snooze แล้ว)
+	query := db.Preload("Task").Where(
+		"is_send = '3' AND snooze IS NOT NULL AND snooze <= ?",
+		now,
+	)
+
+	if err := query.Find(&notifications).Error; err != nil {
+		return nil, fmt.Errorf("Failed to fetch snooze notifications: %v", err)
+	}
+
+	// กรอง notifications ที่งานยังไม่เสร็จ
+	filteredNotifications := []model.Notification{}
+	for _, noti := range notifications {
+		if noti.Task.Status != "2" {
+			filteredNotifications = append(filteredNotifications, noti)
+		}
+	}
+
+	processor := &NotificationProcessor{
+		db:              db,
+		firestoreClient: firestoreClient,
+		app:             app,
+		taskCache:       make(map[int]*TaskInfo),
+		userTokenCache:  make(map[string]string),
+		boardUserCache:  make(map[int][]model.BoardUser),
+		userCache:       make(map[int]model.User),
+	}
+
+	processor.preloadData(filteredNotifications)
+
+	successCount := 0
+	errorCount := 0
+	skippedCount := 0
+
+	const maxWorkers = 10
+	semaphore := make(chan struct{}, maxWorkers)
+	var wg sync.WaitGroup
+	var resultMu sync.Mutex
+
+	for _, notification := range filteredNotifications {
+		wg.Add(1)
+		go func(noti model.Notification) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			result := processor.processSnoozeNotification(noti, now, db)
+			resultMu.Lock()
+			switch result {
+			case "success":
+				successCount++
+			case "skipped":
+				skippedCount++
+			case "error":
+				errorCount++
+			}
+			resultMu.Unlock()
+		}(notification)
+	}
+
+	wg.Wait()
+
+	return &NotificationResult{
+		Message:      "Snooze notifications processed successfully",
+		CurrentTime:  now.Format(time.RFC3339),
+		TotalCount:   len(filteredNotifications),
+		SuccessCount: successCount,
+		ErrorCount:   errorCount,
+		SkippedCount: skippedCount,
+	}, nil
+}
+
+// ProcessRecurringNotifications จัดการการแจ้งเตือน recurring
+func ProcessRecurringNotifications(db *gorm.DB, firestoreClient *firestore.Client) (*NotificationResult, error) {
+	if err := godotenv.Load(); err != nil {
+		fmt.Println("Warning: No .env file found or failed to load")
+	}
+
+	// ใช้ Thailand timezone (GMT+7)
+	thailandTZ, err := time.LoadLocation("Asia/Bangkok")
+	if err != nil {
+		return nil, fmt.Errorf("Failed to load Thailand timezone: %v", err)
+	}
+
+	now := time.Now().In(thailandTZ)
+
+	// ตรวจสอบว่าเป็นเวลา 7:00 AM หรือไม่ (ให้ tolerance 1 นาที)
+	if now.Hour() != 7 || now.Minute() > 1 {
+		log.Println("⏰ Not time for recurring notifications (should be 7:00 AM Thailand time)")
+		return &NotificationResult{
+			Message:      "Not time for recurring notifications",
+			CurrentTime:  now.Format(time.RFC3339),
+			TotalCount:   0,
+			SuccessCount: 0,
+			ErrorCount:   0,
+			SkippedCount: 0,
+		}, nil
+	}
+
+	serviceAccountKeyPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_1")
+	if serviceAccountKeyPath == "" {
+		return nil, fmt.Errorf("Firebase credentials not configured")
+	}
+
+	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to initialize Firebase app: %s", err.Error())
+	}
+
+	var notifications []model.Notification
+
+	// Query สำหรับ recurring notifications ที่ไม่ใช่ "onetime" และงานยังไม่เสร็จ
+	query := db.Preload("Task").Where(
+		"recurring_pattern != 'onetime' AND recurring_pattern != 'never'",
+	)
+
+	if err := query.Find(&notifications).Error; err != nil {
+		return nil, fmt.Errorf("Failed to fetch recurring notifications: %v", err)
+	}
+
+	// กรอง notifications ที่งานยังไม่เสร็จและเลยกำหนดมาแล้ว
+	filteredNotifications := []model.Notification{}
+	nowUTC := time.Now().UTC()
+
+	for _, noti := range notifications {
+		if noti.Task.Status != "2" && noti.DueDate != nil && noti.DueDate.Before(nowUTC) {
+			filteredNotifications = append(filteredNotifications, noti)
+		}
+	}
+
+	processor := &NotificationProcessor{
+		db:              db,
+		firestoreClient: firestoreClient,
+		app:             app,
+		taskCache:       make(map[int]*TaskInfo),
+		userTokenCache:  make(map[string]string),
+		boardUserCache:  make(map[int][]model.BoardUser),
+		userCache:       make(map[int]model.User),
+	}
+
+	processor.preloadData(filteredNotifications)
+
+	successCount := 0
+	errorCount := 0
+	skippedCount := 0
+
+	const maxWorkers = 10
+	semaphore := make(chan struct{}, maxWorkers)
+	var wg sync.WaitGroup
+	var resultMu sync.Mutex
+
+	for _, notification := range filteredNotifications {
+		wg.Add(1)
+		go func(noti model.Notification) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			result := processor.processRecurringNotification(noti, nowUTC, db)
+			resultMu.Lock()
+			switch result {
+			case "success":
+				successCount++
+			case "skipped":
+				skippedCount++
+			case "error":
+				errorCount++
+			}
+			resultMu.Unlock()
+		}(notification)
+	}
+
+	wg.Wait()
+
+	return &NotificationResult{
+		Message:      "Recurring notifications processed successfully",
+		CurrentTime:  nowUTC.Format(time.RFC3339),
+		TotalCount:   len(filteredNotifications),
+		SuccessCount: successCount,
+		ErrorCount:   errorCount,
+		SkippedCount: skippedCount,
+	}, nil
+}
+
+// processSnoozeNotification ประมวลผล snooze notification - แก้ไขให้ return string
+func (p *NotificationProcessor) processSnoozeNotification(notification model.Notification, now time.Time, db *gorm.DB) string {
+	fmt.Printf("Processing snooze notification for Task ID: %d\n", notification.TaskID)
+
+	taskInfo, err := p.getTaskInfoOptimized(notification.TaskID)
+	if err != nil {
+		log.Printf("Failed to get task info for snooze Task ID %d: %v", notification.TaskID, err)
+		return "error"
+	}
+
+	if len(taskInfo.Tokens) == 0 {
+		log.Printf("⏭️ Skipping snooze notification for Task ID %d - no FCM tokens (user disabled notifications)", notification.TaskID)
+		// ยังคงอัปเดต database แม้ไม่ส่งแจ้งเตือน
+		nextSnooze := now.Add(10 * time.Minute)
+		if err := p.db.Model(&notification).Updates(map[string]interface{}{
+			"snooze": nextSnooze,
+		}).Error; err != nil {
+			log.Printf("Failed to update snooze for notification %d: %v", notification.NotificationID, err)
+			return "error"
+		}
+		updateFirestoreNotification(p.firestoreClient, notification, taskInfo.IsGroup, "3", db)
+		return "skipped"
+	}
+
+	// สร้างข้อความสำหรับ snooze
+	message := fmt.Sprintf("⏰ งานของคุณเลยเวลาที่กำหนดมาแล้ว: %s", taskInfo.Task.TaskName)
+
+	data := map[string]string{
+		"taskid":    fmt.Sprintf("%d", notification.TaskID),
+		"timestamp": now.Format(time.RFC3339),
+		"boardid":   fmt.Sprintf("%v", taskInfo.BoardID),
+		"type":      "snooze",
+	}
+
+	err = sendMulticastNotification(p.app, taskInfo.Tokens, "แจ้งเตือนงาน", message, data)
+	if err != nil {
+		log.Printf("Failed to send snooze notification for Task ID %d: %v", notification.TaskID, err)
+		return "error"
+	}
+
+	// อัปเดต snooze เป็นเวลาถัดไป (บวก 10 นาที) และรีเซ็ต is_send เป็น 3
+	nextSnooze := now.Add(10 * time.Minute)
+	if err := p.db.Model(&notification).Updates(map[string]interface{}{
+		"snooze": nextSnooze,
+	}).Error; err != nil {
+		log.Printf("Failed to update snooze for notification %d: %v", notification.NotificationID, err)
+		return "error"
+	}
+
+	updateFirestoreNotification(p.firestoreClient, notification, taskInfo.IsGroup, "3", db)
+	fmt.Printf("✅ Successfully sent snooze notification for Task ID: %d\n", notification.TaskID)
+	return "success"
+}
+
+// processRecurringNotification ประมวลผล recurring notification - แก้ไขให้ return string
+func (p *NotificationProcessor) processRecurringNotification(notification model.Notification, now time.Time, db *gorm.DB) string {
+	fmt.Printf("Processing recurring notification for Task ID: %d\n", notification.TaskID)
+
+	taskInfo, err := p.getTaskInfoOptimized(notification.TaskID)
+	if err != nil {
+		log.Printf("Failed to get task info for recurring Task ID %d: %v", notification.TaskID, err)
+		return "error"
+	}
+
+	if len(taskInfo.Tokens) == 0 {
+		log.Printf("⏭️ Skipping recurring notification for Task ID %d - no FCM tokens (user disabled notifications)", notification.TaskID)
+		// ยังคงอัปเดต Firestore แม้ไม่ส่งแจ้งเตือน
+		updateFirestoreNotification(p.firestoreClient, notification, taskInfo.IsGroup, "recurring", db)
+		return "skipped"
+	}
+
+	// สร้างข้อความสำหรับ recurring
+	daysPassed := int(now.Sub(*notification.DueDate).Hours() / 24)
+	var message string
+	if daysPassed == 1 {
+		message = fmt.Sprintf("📅 งานเลยกำหนด 1 วันแล้ว: %s", taskInfo.Task.TaskName)
+	} else {
+		message = fmt.Sprintf("📅 งานเลยกำหนด %d วันแล้ว: %s", daysPassed, taskInfo.Task.TaskName)
+	}
+
+	data := map[string]string{
+		"taskid":    fmt.Sprintf("%d", notification.TaskID),
+		"timestamp": now.Format(time.RFC3339),
+		"boardid":   fmt.Sprintf("%v", taskInfo.BoardID),
+		"type":      "recurring",
+	}
+
+	err = sendMulticastNotification(p.app, taskInfo.Tokens, "แจ้งเตือนงาน", message, data)
+	if err != nil {
+		log.Printf("Failed to send recurring notification for Task ID %d: %v", notification.TaskID, err)
+		return "error"
+	}
+
+	updateFirestoreNotification(p.firestoreClient, notification, taskInfo.IsGroup, "recurring", db)
+	fmt.Printf("✅ Successfully sent recurring notification for Task ID: %d\n", notification.TaskID)
+	return "success"
 }
 
 // preloadData โหลดข้อมูลที่จำเป็นล่วงหน้าเพื่อลด database queries
@@ -304,11 +633,12 @@ func (p *NotificationProcessor) prepareBatches(notifications []model.Notificatio
 	batches := make([]NotificationBatch, 0, len(notifications))
 
 	for _, notification := range notifications {
-		shouldSend, updateIsSend := p.shouldSendNotification(notification, now)
+		shouldSend, updateIsSend, messageType := p.shouldSendNotification(notification, now)
 		batches = append(batches, NotificationBatch{
 			Notification: notification,
 			UpdateIsSend: updateIsSend,
 			ShouldSend:   shouldSend,
+			MessageType:  messageType,
 		})
 	}
 
@@ -316,66 +646,74 @@ func (p *NotificationProcessor) prepareBatches(notifications []model.Notificatio
 }
 
 // shouldSendNotification ตรวจสอบว่าควรส่ง notification หรือไม่
-func (p *NotificationProcessor) shouldSendNotification(notification model.Notification, now time.Time) (bool, string) {
+func (p *NotificationProcessor) shouldSendNotification(notification model.Notification, now time.Time) (bool, string, string) {
 	if notification.IsSend == "0" {
 		if notification.BeforeDueDate != nil && (notification.BeforeDueDate.Before(now) || notification.BeforeDueDate.Equal(now)) {
-			return true, "1"
+			return true, "1", "before"
 		} else if notification.BeforeDueDate == nil && (notification.DueDate.Before(now) || notification.DueDate.Equal(now)) {
-			return true, "2"
+			return true, "2", "due"
 		}
 	} else if notification.IsSend == "1" {
 		if notification.DueDate.Before(now) || notification.DueDate.Equal(now) {
-			return true, "2"
+			return true, "2", "due"
 		}
 	}
-	return false, ""
+	return false, "", ""
 }
 
-// processNotificationConcurrent ประมวลผล notification แบบ concurrent-safe
-func (p *NotificationProcessor) processNotificationConcurrent(notification model.Notification, updateIsSend string, now time.Time, db *gorm.DB) bool {
-	fmt.Printf("Sending notification for Task ID: %d\n", notification.TaskID)
+// processNotificationConcurrent ประมวลผล notification แบบ concurrent-safe - แก้ไขให้ return string
+func (p *NotificationProcessor) processNotificationConcurrent(notification model.Notification, updateIsSend string, messageType string, now time.Time, db *gorm.DB) string {
+	fmt.Printf("Processing %s notification for Task ID: %d\n", messageType, notification.TaskID)
 
-	message := buildNotificationMessage(notification)
+	message := buildNotificationMessage(notification, messageType)
 	if message == "" {
-		return false
+		return "error"
 	}
 
 	taskInfo, err := p.getTaskInfoOptimized(notification.TaskID)
 	if err != nil {
 		log.Printf("Failed to get task info for Task ID %d: %v", notification.TaskID, err)
-		return false
+		return "error"
 	}
 
 	if len(taskInfo.Tokens) == 0 {
-		log.Printf("No tokens found for user of Task ID %d", notification.TaskID)
-		return false
+		log.Printf("⏭️ Skipping notification for Task ID %d - no FCM tokens (user disabled notifications)", notification.TaskID)
+		// ยังคงอัปเดต database status แม้ไม่ส่งแจ้งเตือน
+		if err := p.db.Model(&notification).Update("is_send", updateIsSend).Error; err != nil {
+			log.Printf("Failed to update notification %d: %v", notification.NotificationID, err)
+			return "error"
+		}
+		updateFirestoreNotification(p.firestoreClient, notification, taskInfo.IsGroup, updateIsSend, db)
+		return "skipped"
 	}
 
 	timestamp, err := p.getTimeInfo(updateIsSend, notification)
 	if err != nil {
 		log.Printf("Failed to get time info for Task ID %d: %v", notification.TaskID, err)
-		return false
+		return "error"
 	}
 
 	data := map[string]string{
 		"taskid":    fmt.Sprintf("%d", notification.TaskID),
 		"timestamp": timestamp,
 		"boardid":   fmt.Sprintf("%v", taskInfo.BoardID),
+		"type":      messageType,
 	}
 
 	err = sendMulticastNotification(p.app, taskInfo.Tokens, "แจ้งเตือนงาน", message, data)
 	if err != nil {
 		log.Printf("Failed to send notification for Task ID %d: %v", notification.TaskID, err)
-		return false
+		return "error"
 	}
 
 	if err := p.db.Model(&notification).Update("is_send", updateIsSend).Error; err != nil {
 		log.Printf("Failed to update notification %d: %v", notification.NotificationID, err)
-		return false
+		return "error"
 	}
 
 	updateFirestoreNotification(p.firestoreClient, notification, taskInfo.IsGroup, updateIsSend, db)
-	return true
+	fmt.Printf("✅ Successfully sent %s notification for Task ID: %d\n", messageType, notification.TaskID)
+	return "success"
 }
 
 // getTaskInfoOptimized ดึงข้อมูล task โดยใช้ cache ที่ preload แล้ว
@@ -506,13 +844,25 @@ func initializeFirebaseApp(serviceAccountKeyPath string) (*firebase.App, error) 
 	return app, nil
 }
 
-func buildNotificationMessage(noti model.Notification) string {
+func buildNotificationMessage(noti model.Notification, messageType string) string {
 	taskName := noti.Task.TaskName
 
-	if noti.BeforeDueDate != nil && noti.IsSend == "0" {
+	switch messageType {
+	case "before":
 		return fmt.Sprintf("⏰ ใกล้ถึงเวลา: %s", taskName)
-	} else if noti.IsSend == "1" || (noti.BeforeDueDate == nil && noti.IsSend == "0") {
+	case "due":
 		return fmt.Sprintf("📌 ถึงกำหนดแล้ว: %s", taskName)
+	case "snooze":
+		return fmt.Sprintf("⏰ งานของคุณเลยเวลาที่กำหนดมาแล้ว: %s", taskName)
+	case "recurring":
+		return fmt.Sprintf("📅 งานยังไม่เสร็จ: %s", taskName)
+	default:
+		// Fallback to original logic
+		if noti.BeforeDueDate != nil && noti.IsSend == "0" {
+			return fmt.Sprintf("⏰ ใกล้ถึงเวลา: %s", taskName)
+		} else if noti.IsSend == "1" || (noti.BeforeDueDate == nil && noti.IsSend == "0") {
+			return fmt.Sprintf("📌 ถึงกำหนดแล้ว: %s", taskName)
+		}
 	}
 
 	return ""
@@ -592,7 +942,6 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				return fmt.Errorf("failed to find board users: %v", err)
 			}
 
-			// updateData["notiCount"] = false
 			updateData["isNotiRemind"] = true
 			updateData["isNotiRemindShow"] = true
 			updateData["dueDateOld"] = firestore.Delete
@@ -625,12 +974,12 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				if err := db.Where("board_id = ?", *task.BoardID).Find(&boardUsers).Error; err != nil {
 					return fmt.Errorf("failed to find board users: %v", err)
 				}
-				updateData["isShow"] = true
-				// updateData["notiCount"] = false
-				updateData["updatedAt"] = time.Now().UTC()
 
+				updateData["isShow"] = true
+				updateData["updatedAt"] = time.Now().UTC()
 				updateData["dueDateOld"] = firestore.Delete
 				updateData["remindMeBeforeOld"] = firestore.Delete
+
 				userNotifications := make(map[string]interface{})
 				for _, boardUser := range boardUsers {
 					userIDStr := fmt.Sprintf("%d", boardUser.UserID)
@@ -641,6 +990,7 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				}
 				updateData["userNotifications"] = userNotifications
 			} else {
+				// Recurring task - update to next day
 				var boardUsers []model.BoardUser
 				var task model.Tasks
 
@@ -655,6 +1005,7 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				if err := db.Where("board_id = ?", *task.BoardID).Find(&boardUsers).Error; err != nil {
 					return fmt.Errorf("failed to find board users: %v", err)
 				}
+
 				nextDueDate := calculateNextDueDate(notification)
 
 				updateData["dueDate"] = nextDueDate
@@ -684,6 +1035,13 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 				}
 				updateData["userNotifications"] = userNotifications
 			}
+		} else if newStatus == "3" {
+			// Snooze notification
+			updateData["isSnooze"] = true
+			updateData["updatedAt"] = time.Now().UTC()
+		} else if newStatus == "recurring" {
+			// Daily recurring reminder - don't change much, just log
+			updateData["lastRecurringNotification"] = time.Now().UTC()
 		}
 	} else {
 		email, err := getTaskOwnerEmail(db, notification.TaskID)
@@ -693,22 +1051,19 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 		docPath = fmt.Sprintf("Notifications/%s/Tasks/%d", email, notification.NotificationID)
 
 		if newStatus == "1" {
-
 			updateData["isNotiRemind"] = true
 			updateData["isNotiRemindShow"] = true
 			updateData["updatedAt"] = time.Now().UTC()
-
 			updateData["dueDateOld"] = firestore.Delete
 			updateData["remindMeBeforeOld"] = firestore.Delete
 		} else if newStatus == "2" {
 			if notification.RecurringPattern == "onetime" {
 				updateData["isShow"] = true
-
 				updateData["updatedAt"] = time.Now().UTC()
-
 				updateData["dueDateOld"] = firestore.Delete
 				updateData["remindMeBeforeOld"] = firestore.Delete
 			} else {
+				// Recurring task
 				nextDueDate := calculateNextDueDate(notification)
 
 				updateData["dueDate"] = nextDueDate
@@ -725,6 +1080,13 @@ func updateFirestoreNotification(client *firestore.Client, notification model.No
 					updateData["remindMeBefore"] = nil
 				}
 			}
+		} else if newStatus == "3" {
+			// Snooze notification
+			updateData["isSnooze"] = true
+			updateData["updatedAt"] = time.Now().UTC()
+		} else if newStatus == "recurring" {
+			// Daily recurring reminder
+			updateData["lastRecurringNotification"] = time.Now().UTC()
 		}
 	}
 
@@ -757,11 +1119,10 @@ func getTaskOwnerEmail(db *gorm.DB, taskID int) (string, error) {
 
 func calculateNextDueDate(notification model.Notification) *time.Time {
 	if notification.DueDate == nil {
-		return nil // หรืออาจคืนค่า time.Now() ก็ได้ ขึ้นกับ logic
+		return nil
 	}
 
 	// คำนวณวันถัดไป
 	nextDate := notification.DueDate.AddDate(0, 0, 1)
-
 	return &nextDate
 }

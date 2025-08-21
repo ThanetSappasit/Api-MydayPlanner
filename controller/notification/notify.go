@@ -493,21 +493,17 @@ func snoozePrivate(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 		return
 	}
 
-	// อัปเดทเวลา due_date เพิ่ม 10 นาที
-	newDueDate := notification.DueDate.Add(10 * time.Minute)
-
-	// อัปเดท beforedue_date ถ้ามี
-	var newBeforeDueDate *time.Time
-	if notification.BeforeDueDate != nil {
-		newBeforeDate := notification.BeforeDueDate.Add(10 * time.Minute)
-		newBeforeDueDate = &newBeforeDate
+	// คำนวณเวลา snooze (due_date + 10 นาที)
+	var newSnooze *time.Time
+	if notification.DueDate != nil {
+		snoozeTime := notification.DueDate.Add(10 * time.Minute)
+		newSnooze = &snoozeTime
 	}
 
-	// อัปเดทข้อมูลในฐานข้อมูล
+	// อัปเดทข้อมูลในฐานข้อมูล - บันทึกใน snooze field
 	if err := db.Model(&notification).Updates(map[string]interface{}{
-		"due_date":       newDueDate,
-		"beforedue_date": newBeforeDueDate,
-		"is_send":        "0", // รีเซ็ตสถานะการส่ง
+		"snooze":  newSnooze,
+		"is_send": "3", // รีเซ็ตสถานะการส่ง
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Update failed",
@@ -518,24 +514,34 @@ func snoozePrivate(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 
 	// อัปเดท Firestore: /Notifications/{email}/Tasks/{notificationid}
 	if task.Creator != nil && task.Creator.Email != "" {
-		err := updatePrivateFirestore(firestoreClient, task.Creator.Email, notification.NotificationID, newDueDate, newBeforeDueDate)
+		err := updatePrivateFirestore(firestoreClient, task.Creator.Email, notification.NotificationID, newSnooze)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
-				"message":      "Private task notification snoozed successfully (Firestore update failed)",
-				"task_id":      taskID,
-				"new_due_date": newDueDate.Format("2006-01-02 15:04:05"),
-				"type":         "private",
-				"warning":      "Firestore update failed: " + err.Error(),
+				"message": "Private task notification snoozed successfully (Firestore update failed)",
+				"task_id": taskID,
+				"snooze_time": func() string {
+					if newSnooze != nil {
+						return newSnooze.Format("2006-01-02 15:04:05")
+					}
+					return ""
+				}(),
+				"type":    "private",
+				"warning": "Firestore update failed: " + err.Error(),
 			})
 			return
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":      "Private task notification snoozed successfully",
-		"task_id":      taskID,
-		"new_due_date": newDueDate.Format("2006-01-02 15:04:05"),
-		"type":         "private",
+		"message": "Private task notification snoozed successfully",
+		"task_id": taskID,
+		"snooze_time": func() string {
+			if newSnooze != nil {
+				return newSnooze.Format("2006-01-02 15:04:05")
+			}
+			return ""
+		}(),
+		"type": "private",
 	})
 }
 
@@ -557,21 +563,17 @@ func snoozeGroup(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client,
 		return
 	}
 
-	// อัปเดทเวลา due_date เพิ่ม 10 นาที
-	newDueDate := notification.DueDate.Add(10 * time.Minute)
-
-	// อัปเดท beforedue_date ถ้ามี
-	var newBeforeDueDate *time.Time
-	if notification.BeforeDueDate != nil {
-		newBeforeDate := notification.BeforeDueDate.Add(10 * time.Minute)
-		newBeforeDueDate = &newBeforeDate
+	// คำนวณเวลา snooze (due_date + 10 นาที)
+	var newSnooze *time.Time
+	if notification.DueDate != nil {
+		snoozeTime := notification.DueDate.Add(10 * time.Minute)
+		newSnooze = &snoozeTime
 	}
 
-	// อัปเดทข้อมูลในฐานข้อมูล
+	// อัปเดทข้อมูลในฐานข้อมูล - บันทึกใน snooze field
 	if err := db.Model(&notification).Updates(map[string]interface{}{
-		"due_date":       newDueDate,
-		"beforedue_date": newBeforeDueDate,
-		"is_send":        "0", // รีเซ็ตสถานะการส่ง
+		"snooze":  newSnooze,
+		"is_send": "3", // รีเซ็ตสถานะการส่ง
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Update failed",
@@ -581,30 +583,40 @@ func snoozeGroup(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client,
 	}
 
 	// อัปเดท Firestore: /BoardTasks/{taskid}/Notifications/{notificationid}
-	err := updateGroupFirestore(firestoreClient, taskID, notification.NotificationID, newDueDate, newBeforeDueDate)
+	err := updateGroupFirestore(firestoreClient, taskID, notification.NotificationID, newSnooze)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
-			"message":      "Group task notification snoozed successfully (Firestore update failed)",
-			"task_id":      taskID,
-			"board_id":     boardID,
-			"new_due_date": newDueDate.Format("2006-01-02 15:04:05"),
-			"type":         "group",
-			"warning":      "Firestore update failed: " + err.Error(),
+			"message":  "Group task notification snoozed successfully (Firestore update failed)",
+			"task_id":  taskID,
+			"board_id": boardID,
+			"snooze_time": func() string {
+				if newSnooze != nil {
+					return newSnooze.Format("2006-01-02 15:04:05")
+				}
+				return ""
+			}(),
+			"type":    "group",
+			"warning": "Firestore update failed: " + err.Error(),
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":      "Group task notification snoozed successfully",
-		"task_id":      taskID,
-		"board_id":     boardID,
-		"new_due_date": newDueDate.Format("2006-01-02 15:04:05"),
-		"type":         "group",
+		"message":  "Group task notification snoozed successfully",
+		"task_id":  taskID,
+		"board_id": boardID,
+		"snooze_time": func() string {
+			if newSnooze != nil {
+				return newSnooze.Format("2006-01-02 15:04:05")
+			}
+			return ""
+		}(),
+		"type": "group",
 	})
 }
 
 // ฟังก์ชันอัปเดท Firestore สำหรับ Private Task
-func updatePrivateFirestore(firestoreClient *firestore.Client, email string, notificationID int, newDueDate time.Time, newBeforeDueDate *time.Time) error {
+func updatePrivateFirestore(firestoreClient *firestore.Client, email string, notificationID int, newSnooze *time.Time) error {
 	ctx := context.Background()
 
 	// สร้าง document reference: /Notifications/{email}/Tasks/{notificationid}
@@ -612,21 +624,19 @@ func updatePrivateFirestore(firestoreClient *firestore.Client, email string, not
 
 	// เตรียมข้อมูลที่จะอัปเดท
 	updateData := map[string]interface{}{
-		"dueDate": newDueDate,
-		"isSend":  "0",
+		"isSend": "3",
 	}
 
-	// เพิ่ม beforeDueDate หากมี
-	if newBeforeDueDate != nil {
-		updateData["beforeDueDate"] = *newBeforeDueDate
+	// เพิ่ม snooze หากมี
+	if newSnooze != nil {
+		updateData["snooze"] = *newSnooze
 	} else {
-		updateData["beforeDueDate"] = nil
+		updateData["snooze"] = nil
 	}
 
 	// อัปเดทข้อมูลใน Firestore
 	_, err := docRef.Update(ctx, []firestore.Update{
-		{Path: "dueDate", Value: updateData["dueDate"]},
-		{Path: "beforeDueDate", Value: updateData["beforeDueDate"]},
+		{Path: "snooze", Value: updateData["snooze"]},
 		{Path: "isSend", Value: updateData["isSend"]},
 	})
 
@@ -634,7 +644,7 @@ func updatePrivateFirestore(firestoreClient *firestore.Client, email string, not
 }
 
 // ฟังก์ชันอัปเดท Firestore สำหรับ Group Task
-func updateGroupFirestore(firestoreClient *firestore.Client, taskID int, notificationID int, newDueDate time.Time, newBeforeDueDate *time.Time) error {
+func updateGroupFirestore(firestoreClient *firestore.Client, taskID int, notificationID int, newSnooze *time.Time) error {
 	ctx := context.Background()
 
 	// สร้าง document reference: /BoardTasks/{taskid}/Notifications/{notificationid}
@@ -642,21 +652,19 @@ func updateGroupFirestore(firestoreClient *firestore.Client, taskID int, notific
 
 	// เตรียมข้อมูลที่จะอัปเดท
 	updateData := map[string]interface{}{
-		"dueDate": newDueDate,
-		"isSend":  "0",
+		"isSend": "3",
 	}
 
-	// เพิ่ม beforeDueDate หากมี
-	if newBeforeDueDate != nil {
-		updateData["beforeDueDate"] = *newBeforeDueDate
+	// เพิ่ม snooze หากมี
+	if newSnooze != nil {
+		updateData["snooze"] = *newSnooze
 	} else {
-		updateData["beforeDueDate"] = nil
+		updateData["snooze"] = nil
 	}
 
 	// อัปเดทข้อมูลใน Firestore
 	_, err := docRef.Update(ctx, []firestore.Update{
-		{Path: "dueDate", Value: updateData["dueDate"]},
-		{Path: "beforeDueDate", Value: updateData["beforeDueDate"]},
+		{Path: "snooze", Value: updateData["snooze"]},
 		{Path: "isSend", Value: updateData["isSend"]},
 	})
 
