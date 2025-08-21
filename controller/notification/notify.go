@@ -493,21 +493,13 @@ func snoozePrivate(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 		return
 	}
 
-	// คำนวณเวลา snooze (due_date + 10 นาที)
-	var newSnooze *time.Time
+	// คำนวณเวลา snooze (now + 10 นาที)
 	now := time.Now()
-	if notification.Snooze != nil {
-		snoozeTime := now.Add(10 * time.Minute)
-		newSnooze = &snoozeTime
-	} else if notification.DueDate != nil && notification.IsSend == "4" {
-		// ถ้าไม่มี snooze → ใช้ due_date แล้วบวก 10 นาที
-		snoozeTime := now.Add(10 * time.Minute)
-		newSnooze = &snoozeTime
-	}
+	newSnooze := now.Add(10 * time.Minute)
 
 	// อัปเดทข้อมูลในฐานข้อมูล - บันทึกใน snooze field
 	if err := db.Model(&notification).Updates(map[string]interface{}{
-		"snooze":  newSnooze,
+		"snooze":  &newSnooze,
 		"is_send": "3", // รีเซ็ตสถานะการส่ง
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -519,34 +511,24 @@ func snoozePrivate(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 
 	// อัปเดท Firestore: /Notifications/{email}/Tasks/{notificationid}
 	if task.Creator != nil && task.Creator.Email != "" {
-		err := updatePrivateFirestore(firestoreClient, task.Creator.Email, notification.NotificationID, newSnooze)
+		err := updatePrivateFirestore(firestoreClient, task.Creator.Email, notification.NotificationID, &newSnooze)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
-				"message": "Private task notification snoozed successfully (Firestore update failed)",
-				"task_id": taskID,
-				"snooze_time": func() string {
-					if newSnooze != nil {
-						return newSnooze.Format("2006-01-02 15:04:05")
-					}
-					return ""
-				}(),
-				"type":    "private",
-				"warning": "Firestore update failed: " + err.Error(),
+				"message":     "Private task notification snoozed successfully (Firestore update failed)",
+				"task_id":     taskID,
+				"snooze_time": newSnooze.Format("2006-01-02 15:04:05"),
+				"type":        "private",
+				"warning":     "Firestore update failed: " + err.Error(),
 			})
 			return
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Private task notification snoozed successfully",
-		"task_id": taskID,
-		"snooze_time": func() string {
-			if newSnooze != nil {
-				return newSnooze.Format("2006-01-02 15:04:05")
-			}
-			return ""
-		}(),
-		"type": "private",
+		"message":     "Private task notification snoozed successfully",
+		"task_id":     taskID,
+		"snooze_time": newSnooze.Format("2006-01-02 15:04:05"),
+		"type":        "private",
 	})
 }
 
@@ -568,21 +550,13 @@ func snoozeGroup(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client,
 		return
 	}
 
-	// คำนวณเวลา snooze (due_date + 10 นาที)
-	var newSnooze *time.Time
-	if notification.Snooze != nil {
-		// ถ้ามี snooze เดิม → เอามาบวก 10 นาที
-		snoozeTime := notification.Snooze.Add(10 * time.Minute)
-		newSnooze = &snoozeTime
-	} else if notification.DueDate != nil {
-		// ถ้าไม่มี snooze → ใช้ due_date แล้วบวก 10 นาที
-		snoozeTime := notification.DueDate.Add(10 * time.Minute)
-		newSnooze = &snoozeTime
-	}
+	// คำนวณเวลา snooze (now + 10 นาที)
+	now := time.Now()
+	newSnooze := now.Add(10 * time.Minute)
 
 	// อัปเดทข้อมูลในฐานข้อมูล - บันทึกใน snooze field
 	if err := db.Model(&notification).Updates(map[string]interface{}{
-		"snooze":  newSnooze,
+		"snooze":  &newSnooze,
 		"is_send": "3", // รีเซ็ตสถานะการส่ง
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -593,35 +567,25 @@ func snoozeGroup(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client,
 	}
 
 	// อัปเดท Firestore: /BoardTasks/{taskid}/Notifications/{notificationid}
-	err := updateGroupFirestore(firestoreClient, taskID, notification.NotificationID, newSnooze)
+	err := updateGroupFirestore(firestoreClient, taskID, notification.NotificationID, &newSnooze)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
-			"message":  "Group task notification snoozed successfully (Firestore update failed)",
-			"task_id":  taskID,
-			"board_id": boardID,
-			"snooze_time": func() string {
-				if newSnooze != nil {
-					return newSnooze.Format("2006-01-02 15:04:05")
-				}
-				return ""
-			}(),
-			"type":    "group",
-			"warning": "Firestore update failed: " + err.Error(),
+			"message":     "Group task notification snoozed successfully (Firestore update failed)",
+			"task_id":     taskID,
+			"board_id":    boardID,
+			"snooze_time": newSnooze.Format("2006-01-02 15:04:05"),
+			"type":        "group",
+			"warning":     "Firestore update failed: " + err.Error(),
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":  "Group task notification snoozed successfully",
-		"task_id":  taskID,
-		"board_id": boardID,
-		"snooze_time": func() string {
-			if newSnooze != nil {
-				return newSnooze.Format("2006-01-02 15:04:05")
-			}
-			return ""
-		}(),
-		"type": "group",
+		"message":     "Group task notification snoozed successfully",
+		"task_id":     taskID,
+		"board_id":    boardID,
+		"snooze_time": newSnooze.Format("2006-01-02 15:04:05"),
+		"type":        "group",
 	})
 }
 

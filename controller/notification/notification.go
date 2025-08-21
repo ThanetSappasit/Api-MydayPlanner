@@ -190,6 +190,9 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		notification.IsSend = *req.IsSend
 	}
 
+	updates["snooze"] = nil
+	notification.Snooze = nil
+
 	// If no updates provided for existing notification, return error
 	if !isNewNotification && len(updates) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
@@ -310,7 +313,7 @@ func prepareNotificationResponse(notification model.Notification) map[string]int
 	}
 
 	if notification.Snooze != nil {
-		responseData["snooze"] = notification.Snooze
+		responseData["snooze"] = nil
 	} else {
 		responseData["snooze"] = nil
 	}
