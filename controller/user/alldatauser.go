@@ -464,7 +464,7 @@ func fetchAllRelatedData(db *gorm.DB, taskIDs []uint) (TaskRelatedData, error) {
 	go func() {
 		defer wg.Done()
 		var checklistsData []model.Checklist
-		if err := db.Raw(`SELECT checklist_id, task_id, checklist_name, status, create_at 
+		if err := db.Raw(`SELECT checklist_id, task_id, checklist_name, status
 			FROM checklists WHERE task_id IN (?)`, taskIDs).Scan(&checklistsData).Error; err != nil {
 			select {
 			case errorChan <- fmt.Errorf("failed to fetch checklists: %w", err):
