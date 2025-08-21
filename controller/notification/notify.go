@@ -501,7 +501,7 @@ func snoozePrivate(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 		newSnooze = &snoozeTime
 	} else if notification.DueDate != nil && notification.IsSend == "4" {
 		// ถ้าไม่มี snooze → ใช้ due_date แล้วบวก 10 นาที
-		snoozeTime := notification.DueDate.Add(10 * time.Minute)
+		snoozeTime := now.Add(10 * time.Minute)
 		newSnooze = &snoozeTime
 	}
 
