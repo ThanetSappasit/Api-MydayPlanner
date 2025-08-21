@@ -135,7 +135,9 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 	// Create update map for dynamic updates
 	updates := make(map[string]interface{})
 
-	// กรณีส่ง DueDate มา
+	onlyDueDate := req.DueDate != nil && req.BeforeDueDate == nil && req.RecurringPattern == nil && req.IsSend == nil
+
+	// Parse and update due date if provided
 	if req.DueDate != nil {
 		parsedDate, err := time.Parse(time.RFC3339, *req.DueDate)
 		if err != nil {
@@ -145,23 +147,19 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 				return
 			}
 		}
-
-		// อัปเดต DueDate
 		updates["due_date"] = &parsedDate
 		notification.DueDate = &parsedDate
 
-		// รีเซ็ต field อื่น ๆ
-		updates["beforedue_date"] = nil
-		notification.BeforeDueDate = nil
-
-		updates["snooze"] = nil
-		notification.Snooze = nil
-
-		updates["is_send"] = "0" // หรือค่า default ตาม model
-		notification.IsSend = "0"
+		// ถ้าเป็นกรณีที่มี notification อยู่แล้ว และส่งแค่ due_date
+		if !isNewNotification && onlyDueDate {
+			updates["beforedue_date"] = nil
+			updates["snooze"] = nil
+			notification.BeforeDueDate = nil
+			notification.Snooze = nil
+		}
 	}
 
-	// กรณีส่ง BeforeDueDate มา
+	// Parse and update before due date if provided
 	if req.BeforeDueDate != nil {
 		if *req.BeforeDueDate == "" {
 			updates["beforedue_date"] = nil
@@ -180,22 +178,16 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		}
 	}
 
-	// กรณีส่ง RecurringPattern มา
+	// Update recurring pattern if provided
 	if req.RecurringPattern != nil {
 		updates["recurring_pattern"] = *req.RecurringPattern
 		notification.RecurringPattern = *req.RecurringPattern
 	}
 
-	// กรณีส่ง IsSend มา
+	// Update is_send if provided
 	if req.IsSend != nil {
 		updates["is_send"] = *req.IsSend
 		notification.IsSend = *req.IsSend
-	}
-
-	// อัปเดตใน DB
-	if err := db.Model(&notification).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
-		return
 	}
 
 	// If no updates provided for existing notification, return error
@@ -225,6 +217,7 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		return
 	} else {
 		// Update existing notification
+
 		if err := db.Model(&notification).Updates(updates).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
 			return
