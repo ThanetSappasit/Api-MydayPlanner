@@ -129,7 +129,6 @@ func Checklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		TaskID:        taskID,
 		ChecklistName: req.ChecklistName,
 		Status:        "0",
-		CreateAt:      time.Now(),
 	}
 
 	if err := tx.Create(&newChecklist).Error; err != nil {
@@ -175,7 +174,6 @@ func saveTaskToFirestore(ctx context.Context, client *firestore.Client, checklis
 		"task_id":        checklist.TaskID,
 		"checklist_name": checklist.ChecklistName,
 		"status":         checklist.Status,
-		"create_at":      checklist.CreateAt,
 		"updatedAt":      time.Now(),
 	}
 

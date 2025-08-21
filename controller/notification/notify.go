@@ -93,7 +93,7 @@ func InviteBoardNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.C
 	}
 
 	// Initialize Firebase app
-	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	app, err := services.InitializeFirebaseApp(serviceAccountKeyPath)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
 		return
@@ -215,7 +215,7 @@ func AcceptInviteNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 	}
 
 	// Initialize Firebase app
-	app, err := initializeFirebaseApp(serviceAccountKeyPath)
+	app, err := services.InitializeFirebaseApp(serviceAccountKeyPath)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to initialize Firebase app: " + err.Error()})
 		return
@@ -229,7 +229,7 @@ func AcceptInviteNotify(c *gin.Context, db *gorm.DB, firestoreClient *firestore.
 	}
 
 	// หมายเหตุ: คุณต้องส่ง firebase.App เป็น parameter หรือสร้างที่นี่
-	if err := sendMulticastNotification(app, fcmTokens, title, body, data); err != nil {
+	if err := services.SendMulticastNotification(app, fcmTokens, title, body, data); err != nil {
 		fmt.Printf("Error sending notification: %v", err)
 		c.JSON(500, gin.H{
 			"error": "Failed to send notification",
@@ -495,7 +495,12 @@ func snoozePrivate(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Clien
 
 	// คำนวณเวลา snooze (due_date + 10 นาที)
 	var newSnooze *time.Time
-	if notification.DueDate != nil {
+	if notification.Snooze != nil {
+		// ถ้ามี snooze เดิม → เอามาบวก 10 นาที
+		snoozeTime := notification.Snooze.Add(10 * time.Minute)
+		newSnooze = &snoozeTime
+	} else if notification.DueDate != nil && notification.IsSend == "4" {
+		// ถ้าไม่มี snooze → ใช้ due_date แล้วบวก 10 นาที
 		snoozeTime := notification.DueDate.Add(10 * time.Minute)
 		newSnooze = &snoozeTime
 	}
@@ -565,7 +570,12 @@ func snoozeGroup(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client,
 
 	// คำนวณเวลา snooze (due_date + 10 นาที)
 	var newSnooze *time.Time
-	if notification.DueDate != nil {
+	if notification.Snooze != nil {
+		// ถ้ามี snooze เดิม → เอามาบวก 10 นาที
+		snoozeTime := notification.Snooze.Add(10 * time.Minute)
+		newSnooze = &snoozeTime
+	} else if notification.DueDate != nil {
+		// ถ้าไม่มี snooze → ใช้ due_date แล้วบวก 10 นาที
 		snoozeTime := notification.DueDate.Add(10 * time.Minute)
 		newSnooze = &snoozeTime
 	}

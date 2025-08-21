@@ -402,7 +402,6 @@ func buildChecklistsMap(checklists []model.Checklist) []map[string]interface{} {
 			"TaskID":        checklist.TaskID,
 			"ChecklistName": checklist.ChecklistName,
 			"Status":        checklist.Status,
-			"CreatedAt":     checklist.CreateAt,
 		})
 	}
 	return result

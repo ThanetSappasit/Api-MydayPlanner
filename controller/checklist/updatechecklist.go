@@ -262,7 +262,6 @@ func UpdateChecklist(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cli
 			"task_id":        updatedChecklist.TaskID,
 			"checklist_name": updatedChecklist.ChecklistName,
 			"status":         updatedChecklist.Status,
-			"create_at":      updatedChecklist.CreateAt,
 		},
 		"firestoreUpdated": firestoreUpdated,
 	})

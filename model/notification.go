@@ -11,7 +11,7 @@ type Notification struct {
 	BeforeDueDate    *time.Time `gorm:"column:beforedue_date"`
 	Snooze           *time.Time `gorm:"column:snooze"`
 	RecurringPattern string     `gorm:"column:recurring_pattern;type:varchar(255);default:'onetime'"`
-	IsSend           string     `gorm:"column:is_send;type:enum('0','1','2','3');default:'0'"` // enum string
+	IsSend           string     `gorm:"column:is_send;type:enum('0','1','2','3','4');default:'0'"` // enum string
 	CreatedAt        time.Time  `gorm:"column:created_at;autoCreateTime"`
 
 	// Relations
