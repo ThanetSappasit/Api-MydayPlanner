@@ -148,6 +148,8 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		}
 		updates["due_date"] = &parsedDate
 		notification.DueDate = &parsedDate
+		updates["snooze"] = nil
+		notification.Snooze = nil
 	}
 
 	// Parse and update before due date if provided
@@ -167,28 +169,6 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 			}
 			updates["beforedue_date"] = &parsedBeforeDate
 			notification.BeforeDueDate = &parsedBeforeDate
-		}
-	}
-
-	// Parse and update snooze if provided (but not always processed)
-	if req.Snooze != nil {
-		if *req.Snooze == "" {
-			// If snooze is explicitly set to empty string, set it to nil
-			updates["snooze"] = nil
-			notification.Snooze = nil
-		} else {
-			parsedSnooze, err := time.Parse(time.RFC3339, *req.Snooze)
-			if err != nil {
-				parsedSnooze, err = time.Parse("2006-01-02T15:04:05Z07:00", *req.Snooze)
-				if err != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid snooze date format. Use RFC3339 format"})
-					return
-				}
-			}
-			// Note: Snooze update is conditional and might not always be processed
-			// You can add additional logic here to determine when to update snooze
-			updates["snooze"] = &parsedSnooze
-			notification.Snooze = &parsedSnooze
 		}
 	}
 
