@@ -135,27 +135,35 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 	// Create update map for dynamic updates
 	updates := make(map[string]interface{})
 
-	// Parse and update due date if provided
+	// กรณีส่ง DueDate มา
 	if req.DueDate != nil {
 		parsedDate, err := time.Parse(time.RFC3339, *req.DueDate)
 		if err != nil {
-			// Try alternative format if RFC3339 fails
 			parsedDate, err = time.Parse("2006-01-02T15:04:05Z07:00", *req.DueDate)
 			if err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid due date format. Use RFC3339 format"})
 				return
 			}
 		}
+
+		// อัปเดต DueDate
 		updates["due_date"] = &parsedDate
 		notification.DueDate = &parsedDate
+
+		// รีเซ็ต field อื่น ๆ
+		updates["beforedue_date"] = nil
+		notification.BeforeDueDate = nil
+
 		updates["snooze"] = nil
 		notification.Snooze = nil
+
+		updates["is_send"] = "0" // หรือค่า default ตาม model
+		notification.IsSend = "0"
 	}
 
-	// Parse and update before due date if provided
+	// กรณีส่ง BeforeDueDate มา
 	if req.BeforeDueDate != nil {
 		if *req.BeforeDueDate == "" {
-			// If BeforeDueDate is explicitly set to empty string, set it to nil
 			updates["beforedue_date"] = nil
 			notification.BeforeDueDate = nil
 		} else {
@@ -172,16 +180,22 @@ func UpdateNotificationDynamic(c *gin.Context, db *gorm.DB, firestoreClient *fir
 		}
 	}
 
-	// Update recurring pattern if provided
+	// กรณีส่ง RecurringPattern มา
 	if req.RecurringPattern != nil {
 		updates["recurring_pattern"] = *req.RecurringPattern
 		notification.RecurringPattern = *req.RecurringPattern
 	}
 
-	// Update is_send if provided (convert to string type as per model)
+	// กรณีส่ง IsSend มา
 	if req.IsSend != nil {
 		updates["is_send"] = *req.IsSend
 		notification.IsSend = *req.IsSend
+	}
+
+	// อัปเดตใน DB
+	if err := db.Model(&notification).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
+		return
 	}
 
 	// If no updates provided for existing notification, return error

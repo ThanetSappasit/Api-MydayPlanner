@@ -78,10 +78,22 @@ func CompleteTask(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client
 		return
 	}
 
-	// อัปเดต is_send ใน SQL
-	if err := db.Model(&notification).Update("is_send", "2").Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update is_send in SQL"})
-		return
+	if newStatus == "0" {
+		// อัปเดต is_send ใน SQL
+		if err := db.Model(&notification).Updates(map[string]interface{}{
+			"is_send":        "0",
+			"due_date":       nil, // ใช้ nil แทน "null"
+			"beforedue_date": nil,
+			"snooze":         nil,
+		}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update is_send in SQL"})
+			return
+		}
+	} else {
+		if err := db.Model(&notification).Update("is_send", "2").Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update is_send in SQL"})
+			return
+		}
 	}
 
 	ctx := context.Background()
@@ -215,7 +227,7 @@ func UpdateTaskStatus(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Cl
 			log.Printf("Failed to fetch notification: %v", err)
 		} else {
 			// อัปเดต SQL
-			if err := db.Model(&notification).Update("is_send", true).Error; err != nil {
+			if err := db.Model(&notification).Update("is_send", "2").Error; err != nil {
 				log.Printf("Failed to update is_send in SQL: %v", err)
 			}
 
