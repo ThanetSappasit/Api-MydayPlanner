@@ -54,6 +54,7 @@ func StartServer() {
 	task.TodayTaskController(router, DB, FB)
 	task.UpdateTaskController(router, DB, FB)
 	task.DeleteTaskController(router, DB, FB)
+	task.AssignedController(router, DB, FB)
 
 	notification.NotificationTaskController(router, DB, FB)
 	notification.SendNotificationTaskController(router, DB, FB)
