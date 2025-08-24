@@ -77,11 +77,8 @@ func CreateRefreshToken(userID uint) (string, error) {
 }
 
 func HashRefreshToken(token string) (string, error) {
-	// ใช้ SHA-256 เพื่อลดความยาวของ token ก่อนส่งเข้า bcrypt
-	// SHA-256 จะผลิต hash ที่มีความยาวแน่นอนเป็น 32 bytes (256 bits)
 	hash := sha256.Sum256([]byte(token))
 
-	// เอา hash ที่ได้จาก SHA-256 ที่มีความยาวแน่นอนแล้วไปเข้า bcrypt
 	hashedToken, err := bcrypt.GenerateFromPassword(hash[:], bcrypt.DefaultCost)
 	if err != nil {
 		return "", err

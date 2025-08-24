@@ -19,9 +19,21 @@ import (
 	"cloud.google.com/go/firestore"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/pquerna/otp"
+	"github.com/pquerna/otp/totp"
 	"google.golang.org/api/iterator"
 	"gorm.io/gorm"
 )
+
+type OTPRecord struct {
+	Email     string    `firestore:"email"`
+	Reference string    `firestore:"reference"`
+	Is_used   string    `firestore:"is_used"`
+	CreatedAt time.Time `firestore:"createdAt"`
+	ExpiresAt time.Time `firestore:"expiresAt"`
+	Type      string    `firestore:"type"`
+	// ลบ OTP string `firestore:"otp"` ออก เพราะไม่ต้องเก็บ OTP code จริงใน TOTP
+}
 
 func OTPController(router *gin.Engine, db *gorm.DB, firestoreClient *firestore.Client) {
 	routes := router.Group("/auth")
@@ -67,18 +79,24 @@ func LoadEmailConfig() (*model.EmailConfig, error) {
 	return config, nil
 }
 
-func generateOTP(length int) (string, error) {
-	if length <= 0 {
-		return "", fmt.Errorf("length must be greater than 0")
+func generateTOTP() (string, error) {
+	secret := os.Getenv("TOTPsecret")
+	if secret == "" {
+		return "", fmt.Errorf("TOTP secret not found in environment")
 	}
 
-	// In Go 1.20+, you don't need to call rand.Seed anymore
-	var otp strings.Builder
-	for i := 0; i < length; i++ {
-		otp.WriteString(string(rune('0' + rand.Intn(10)))) // Random digit 0-9
+	// สร้าง TOTP code ที่มีอายุ 15 นาที (900 seconds)
+	code, err := totp.GenerateCodeCustom(secret, time.Now(), totp.ValidateOpts{
+		Period:    900, // 15 minutes in seconds
+		Skew:      0,
+		Digits:    6,
+		Algorithm: otp.AlgorithmSHA256,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to generate TOTP: %v", err)
 	}
 
-	return otp.String(), nil
+	return code, nil
 }
 
 func generateREF(length int) string {
@@ -356,20 +374,20 @@ func blockEmail(c context.Context, firestoreClient *firestore.Client, email stri
 }
 
 // ฟังก์ชันบันทึกข้อมูล OTP ลงใน Firebase
-func saveOTPRecord(c context.Context, firestoreClient *firestore.Client, email, otp, ref string, record string) error {
+func saveTOTPRecord(c context.Context, firestoreClient *firestore.Client, email, ref string, record string) error {
 	expirationTime := time.Now().Add(15 * time.Minute)
-	otpData := map[string]interface{}{
+	totpData := map[string]interface{}{
 		"email":     email,
-		"otp":       otp,
 		"reference": ref,
 		"is_used":   "0",
 		"createdAt": time.Now(),
 		"expiresAt": expirationTime,
+		"type":      "totp", // เพิ่มเพื่อระบุว่าเป็น TOTP
 	}
 
 	mainDoc := firestoreClient.Collection("OTPRecords").Doc(email)
 	subCollection := mainDoc.Collection(fmt.Sprintf("OTPRecords_%s", record))
-	_, err := subCollection.Doc(ref).Set(c, otpData)
+	_, err := subCollection.Doc(ref).Set(c, totpData)
 	return err
 }
 
@@ -478,10 +496,10 @@ func Sendemail(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		return
 	}
 
-	// สร้าง OTP และ REF
-	otp, err := generateOTP(6)
+	// สร้าง TOTP แทน OTP แบบสุ่ม
+	otp, err := generateTOTP()
 	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to generate OTP"})
+		c.JSON(500, gin.H{"error": "Failed to generate TOTP"})
 		return
 	}
 
@@ -490,7 +508,6 @@ func Sendemail(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 
 	var recordemail string
 	var recordfirebase string
-	// ส่งอีเมล
 
 	switch req.Record {
 	case "1":
@@ -500,16 +517,17 @@ func Sendemail(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		recordemail = "รหัส OTP สำหรับรีเซ็ตรหัสผ่าน"
 		recordfirebase = "resetpassword"
 	}
+
 	err = sendEmail(req.Email, recordemail, emailContent)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to send email: " + err.Error()})
 		return
 	}
 
-	// บันทึกข้อมูล OTP ลงใน Firebase
-	err = saveOTPRecord(c, firestoreClient, req.Email, otp, req.Reference, recordfirebase)
+	// บันทึกข้อมูล TOTP ลงใน Firebase (ไม่ต้องเก็บ OTP code จริง เก็บเฉพาะ metadata)
+	err = saveTOTPRecord(c, firestoreClient, req.Email, req.Reference, recordfirebase)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to save OTP record: " + err.Error()})
+		c.JSON(500, gin.H{"error": "Failed to save TOTP record: " + err.Error()})
 		return
 	}
 
@@ -591,7 +609,7 @@ func VerifyOTP(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	}
 
 	// ตรวจสอบว่า OTP ตรงกันหรือไม่
-	if otpRecord.OTP != verifyRequest.OTP {
+	if !verifyTOTP(verifyRequest.OTP, otpRecord.CreatedAt) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid OTP"})
 		return
 	}
@@ -728,6 +746,28 @@ func VerifyOTP(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	c.JSON(http.StatusOK, responseData)
 }
 
+func verifyTOTP(inputCode string, createdAt time.Time) bool {
+	secret := os.Getenv("TOTPsecret")
+	if secret == "" {
+		return false
+	}
+
+	// ตรวจสอบ TOTP code กับเวลาที่สร้าง
+	valid, err := totp.ValidateCustom(inputCode, secret, createdAt, totp.ValidateOpts{
+		Period:    900, // 15 minutes in seconds
+		Skew:      0,   // อนุญาตให้คลาดเคลื่อนได้ 1 period
+		Digits:    6,
+		Algorithm: otp.AlgorithmSHA256,
+	})
+
+	if err != nil {
+		fmt.Printf("TOTP validation error: %v", err)
+		return false
+	}
+
+	return valid
+}
+
 func ResendOTP(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	var req dto.ResendOTPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -779,9 +819,9 @@ func ResendOTP(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 	}
 
 	// สร้าง OTP และ REF ใหม่
-	otp, err := generateOTP(6)
+	otp, err := generateTOTP()
 	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to generate OTP"})
+		c.JSON(500, gin.H{"error": "Failed to generate TOTP"})
 		return
 	}
 
@@ -796,9 +836,10 @@ func ResendOTP(c *gin.Context, db *gorm.DB, firestoreClient *firestore.Client) {
 		return
 	}
 
-	err = saveOTPRecord(c, firestoreClient, req.Email, otp, ref, recordfirebase)
+	// บันทึกข้อมูล TOTP ลงใน Firebase (ไม่ต้องเก็บ OTP code จริง เก็บเฉพาะ metadata)
+	err = saveTOTPRecord(c, firestoreClient, req.Email, ref, recordfirebase)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to save OTP record: " + err.Error()})
+		c.JSON(500, gin.H{"error": "Failed to save TOTP record: " + err.Error()})
 		return
 	}
 
